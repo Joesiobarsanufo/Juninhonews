@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import time
-import json # Para logs mais detalhados da API do Telegram
+import json
 from datetime import datetime, timedelta
 
 import ephem
@@ -14,9 +14,6 @@ from bs4 import BeautifulSoup
 # from unidecode import unidecode # Descomente se for usar para normalizar texto em queries
 
 # --- Configuração básica de logging ---
-# Em um ambiente de servidor, você pode querer logar para um arquivo:
-# logging.basicConfig(filename='juninho_news.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s')
-# Por enquanto, logando para o console:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s')
 
 # --- Carregar Segredos das Variáveis de Ambiente ---
@@ -25,11 +22,11 @@ EXCHANGE_RATE_API_KEY = os.getenv('EXCHANGE_RATE_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-USER_AGENT = "JuninhoNewsBot/1.0 (Automated Script)"
+USER_AGENT = "JuninhoNewsBot/1.1 (Automated Script)" # Versão atualizada
 FUSO_BRASIL = pytz.timezone('America/Sao_Paulo')
-FILE_PATH_DATAS_COMEMORATIVAS = "datas comemorativas.xlsx" # Assume que está no mesmo diretório
+FILE_PATH_DATAS_COMEMORATIVAS = "datas comemorativas.xlsx"
 
-# --- Funções Utilitárias e de Busca (Adaptadas do Colab) ---
+# --- Funções Utilitárias e de Busca ---
 
 def safe_request_get(url, params=None, timeout=10, max_retries=2, delay_seconds=2):
     """Faz uma requisição GET com tratamento de erro, User-Agent e retries."""
@@ -69,36 +66,44 @@ def safe_request_get(url, params=None, timeout=10, max_retries=2, delay_seconds=
     return None
 
 def fase_da_lua(data_str_ephem_format: str) -> str:
-    """Calcula a fase da lua para uma data (formato YYYY/MM/DD)."""
+    """Calcula a fase da lua para uma data (formato YYYY/MM/DD) de forma simplificada."""
     try:
-        data_ephem = ephem.Date(data_str_ephem_format)
-        lua = ephem.Moon(data_ephem)
-        fase_percentual = lua.phase
+        date_observer = ephem.Date(data_str_ephem_format)
+        moon = ephem.Moon(date_observer)
+        
+        # moon.phase é a porcentagem de iluminação (0-100)
+        illumination = moon.phase
 
-        pnm = ephem.previous_new_moon(data_ephem)
-        nfm = ephem.next_full_moon(data_ephem) # Próxima lua cheia a partir da data atual
+        # Determinar se a lua está crescendo ou minguando
+        # Comparamos a iluminação atual com a iluminação de um dia antes e um dia depois
+        # Isso é uma simplificação; uma análise mais precisa envolveria os ângulos sol-terra-lua.
+        # Para uma aproximação, podemos verificar a fase da próxima lua nova e cheia.
+        
+        next_new_moon_date = ephem.next_new_moon(date_observer)
+        next_full_moon_date = ephem.next_full_moon(date_observer)
 
-        # Lógica simplificada baseada na iluminação (0-100 para ephem.Moon().phase)
-        # As fases são aproximadas.
-        if fase_percentual < 3: return "Lua Nova 🌑"
-        elif fase_percentual < 23:
-             # Verifica se estamos mais perto do quarto crescente
-             nfqm = ephem.next_first_quarter_moon(pnm) # Próximo quarto crescente após a última nova
-             if data_ephem < nfqm:
-                 return "Lua Crescente Côncava 🌒"
-             else: # Estamos no ou após o quarto crescente, mas antes de ficar muito gibosa
-                 return "Quarto Crescente 🌓" 
-        elif fase_percentual < 48: return "Lua Crescente Gibosa 🌔"
-        elif fase_percentual < 52: return "Lua Cheia 🌕"
-        elif fase_percentual < 73: return "Lua Minguante Gibosa 🌖"
-        elif fase_percentual < 97:
-             # Verifica se estamos mais perto do quarto minguante
-             nlqm = ephem.next_last_quarter_moon(nfm) # Próximo quarto minguante após a última cheia
-             if data_ephem < nlqm:
-                 return "Quarto Minguante 🌗"
-             else: # Estamos no ou após o quarto minguante
-                 return "Lua Minguante Côncava 🌘"
-        else: return "Lua Nova (final) 🌑"
+        is_waxing = date_observer < next_full_moon_date < next_new_moon_date or \
+                    next_new_moon_date < date_observer < next_full_moon_date # Lua está entre Nova e Cheia
+        
+        if illumination < 3: return "Lua Nova 🌑"
+        if illumination > 97: return "Lua Nova (final) 🌑" # Quase nova de novo / fim da minguante
+
+        if illumination >= 47 and illumination <= 53: return "Lua Cheia 🌕"
+        
+        if illumination >= 22 and illumination <= 28: # Em torno de 25%
+            return "Quarto Crescente 🌓" if is_waxing else "Quarto Minguante 🌗"
+
+        if is_waxing:
+            if illumination < 22: return "Lua Crescente Côncava 🌒"
+            if illumination < 47: return "Lua Crescente Gibosa 🌔"
+        else: # Waning
+            if illumination > 78: return "Lua Minguante Côncava 🌘" # (Corrigido para > 78 e < 97)
+            if illumination > 53: return "Lua Minguante Gibosa 🌖"
+        
+        # Fallback se a lógica acima não cobrir (improvável com a correção)
+        if illumination < 50: return "Fase Crescente (genérico) 🌔"
+        else: return "Fase Minguante (genérico) 🌖"
+
     except Exception as e:
         logging.exception(f"Erro ao calcular fase da lua para '{data_str_ephem_format}': {e}")
         return "Fase da lua indisponível"
@@ -108,10 +113,13 @@ def obter_datas_comemorativas(file_path: str, sheet_name='tabela') -> str:
     try:
         if not os.path.exists(file_path):
             logging.warning(f"Arquivo de datas comemorativas não encontrado: {file_path}")
-            return "⚠️ Arquivo de datas comemorativas não encontrado."
+            return escape_markdown_v2("⚠️ Arquivo de datas comemorativas não encontrado.")
         df = pd.read_excel(file_path, sheet_name=sheet_name)
-        # Assegura que a primeira coluna seja usada para data e a segunda para descrição
-        df.columns = ['DataRaw', 'DescricaoRaw'] + list(df.columns[2:]) 
+        if df.empty or len(df.columns) < 2:
+            logging.warning(f"Arquivo de datas comemorativas '{file_path}' está vazio ou com formato incorreto.")
+            return escape_markdown_v2("⚠️ Arquivo de datas comemorativas vazio ou mal formatado.")
+            
+        df.columns = ['DataRaw', 'DescricaoRaw'] + list(df.columns[2:])
         df['Data'] = pd.to_datetime(df['DataRaw'], errors='coerce')
         df['Descricao'] = df['DescricaoRaw'].astype(str).str.strip()
         
@@ -119,12 +127,11 @@ def obter_datas_comemorativas(file_path: str, sheet_name='tabela') -> str:
         datas_hoje = df[df['Data'].dt.date == data_atual_obj]
         
         if not datas_hoje.empty:
-            # Para Telegram, usar \- para itens de lista se a linha começar com * ou -
             return "\n".join(f"\\- {escape_markdown_v2(row['Descricao'])}" for _, row in datas_hoje.iterrows())
-        return f"Nenhuma data comemorativa listada para hoje ({data_atual_obj.strftime('%d/%m')})."
+        return escape_markdown_v2(f"Nenhuma data comemorativa listada para hoje ({data_atual_obj.strftime('%d/%m')}).")
     except Exception as e:
         logging.exception(f"Erro ao ler/processar datas comemorativas '{file_path}': {e}")
-        return "⚠️ Erro ao carregar datas comemorativas."
+        return escape_markdown_v2("⚠️ Erro ao carregar datas comemorativas.")
 
 def get_crypto_price(coin_id: str, coin_name: str) -> float | None:
     """Busca preço de criptomoeda da API CoinGecko."""
@@ -174,12 +181,18 @@ def get_quote_pensador() -> str:
             if frases_tags:
                 frase_escolhida = random.choice(frases_tags)
                 texto_frase = frase_escolhida.text.strip()
-                autor_tag = frase_escolhida.find_next_sibling("p")
                 autor = None
-                if autor_tag and autor_tag.find('a'):
-                     autor = autor_tag.find('a').text.strip()
-                elif frase_escolhida.find_parent().find("span", class_="autor") :
-                     autor = frase_escolhida.find_parent().find("span", class_="autor").text.strip()
+                # Tenta encontrar o autor em diferentes estruturas comuns
+                autor_tag_p = frase_escolhida.find_next_sibling("p", class_="autor")
+                if autor_tag_p:
+                    autor_link = autor_tag_p.find('a')
+                    if autor_link:
+                        autor = autor_link.text.strip()
+                if not autor: # Tenta outra estrutura
+                    autor_span_parent = frase_escolhida.find_parent().find("span", class_="autor")
+                    if autor_span_parent:
+                        autor = autor_span_parent.text.strip()
+                
                 return f'"{texto_frase}"{f" - {autor}" if autor else ""}'
             logging.warning("Nenhuma tag 'p.frase' encontrada no Pensador.com.")
             return "⚠️ Nenhuma frase encontrada (layout pode ter mudado)."
@@ -197,10 +210,15 @@ def get_boatos_org_feed() -> dict | str :
             items = soup.find_all("item")
             if items:
                 boato = random.choice(items)
-                titulo = boato.find("title").text.strip()
-                link = boato.find("link").text.strip()
-                logging.info("Boato desmentido obtido do Boatos.org.")
-                return {"title": titulo, "link": link}
+                titulo_tag = boato.find("title")
+                link_tag = boato.find("link")
+                if titulo_tag and link_tag:
+                    titulo = titulo_tag.text.strip()
+                    link = link_tag.text.strip()
+                    logging.info("Boato desmentido obtido do Boatos.org.")
+                    return {"title": titulo, "link": link}
+                logging.warning("Tags 'title' ou 'link' não encontradas no item do feed Boatos.org.")
+                return "⚠️ Formato inesperado no item do feed Boatos.org."
             logging.warning("Nenhum item encontrado no feed RSS do Boatos.org.")
             return "⚠️ Nenhuma fake news desmentida encontrada no feed."
         except Exception as e:
@@ -236,6 +254,7 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
     if not NEWS_API_KEY:
         return [], "⚠️ Chave de API (NewsAPI) não configurada."
     url = "https://newsapi.org/v2/everything"
+    # query_api = unidecode(query_term) if 'unidecode' in globals() else query_term # Opcional
     parametros = {
         'q': query_term, 'language': 'pt', 'sortBy': 'publishedAt',
         'pageSize': max_articles + 10, 'apiKey': NEWS_API_KEY
@@ -254,17 +273,17 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
         titulos_exibidos = set()
         for artigo_api in dados.get('articles', []):
             titulo = artigo_api.get('title')
-            if not titulo or titulo == "[Removed]" or titulo in titulos_exibidos:
+            if not titulo or "[Removed]" in titulo or titulo in titulos_exibidos: # Filtro melhorado
                 continue
             titulos_exibidos.add(titulo)
             descricao = artigo_api.get('description')
-            if descricao and len(descricao) > 200: # Limite um pouco maior para Telegram
+            if descricao and len(descricao) > 200:
                 descricao = descricao[:197].strip() + "..."
             
             articles_data.append({
                 "title": titulo,
                 "source": artigo_api.get('source', {}).get('name', 'N/A'),
-                "description": descricao,
+                "description": descricao if descricao else "", # Garante que é string
                 "url": artigo_api.get('url')
             })
             if len(articles_data) >= max_articles:
@@ -294,64 +313,88 @@ def formatar_para_telegram(jornal_data: dict) -> str:
     """Formata os dados do jornal para Telegram MarkdownV2."""
     tg_list = []
 
-    tg_list.append(f"*{escape_markdown_v2(f'📰 Juninho News - {jornal_data["data_display"]}')}*")
-    tg_list.append(f"_{escape_markdown_v2(f'📌 De Pires do Rio-GO')}_")
-    tg_list.append(f"_{escape_markdown_v2(f'🌒 Fase da Lua: {jornal_data["fase_lua"]}')}_")
+    # --- Cabeçalho ---
+    data_display_str = jornal_data["data_display"]
+    titulo_principal_interno = f'📰 Juninho News - {data_display_str}'
+    titulo_principal_escapado = escape_markdown_v2(titulo_principal_interno)
+    tg_list.append(f"*{titulo_principal_escapado}*")
+
+    local_interno = f'📌 De Pires do Rio-GO'
+    local_escapado = escape_markdown_v2(local_interno)
+    tg_list.append(f"_{local_escapado}_")
+
+    fase_lua_str = jornal_data["fase_lua"]
+    fase_lua_interno = f'🌒 Fase da Lua: {fase_lua_str}'
+    fase_lua_escapado = escape_markdown_v2(fase_lua_interno)
+    tg_list.append(f"_{fase_lua_escapado}_")
     tg_list.append(escape_markdown_v2("--------------------"))
 
+    # --- Frase e Versículo ---
+    frase_dia_str = jornal_data['frase_dia']
     tg_list.append(f"*{escape_markdown_v2('💭 Frase de Hoje')}*")
-    tg_list.append(f"_{escape_markdown_v2(jornal_data['frase_dia'])}_")
-    tg_list.append(f"\n*{escape_markdown_v2('📖 Versículo do Dia')}*")
-    tg_list.append(f"_{escape_markdown_v2(jornal_data['versiculo_dia'])}_")
+    tg_list.append(f"_{escape_markdown_v2(frase_dia_str)}_")
+    
+    versiculo_dia_str = jornal_data['versiculo_dia']
+    tg_list.append(f"\n*{escape_markdown_v2('📖 Versículo do Dia')}*") # Adiciona \n para separar visualmente
+    tg_list.append(f"_{escape_markdown_v2(versiculo_dia_str)}_")
     tg_list.append(f"_{escape_markdown_v2('Fonte: Bible Gateway (ARC)')}_")
     tg_list.append(escape_markdown_v2("--------------------"))
 
-    tg_list.append(f"*{escape_markdown_v2(f'🗓️ Datas Comemorativas - {jornal_data["data_display"]}')}*")
-    if jornal_data['datas_comemorativas'] and not jornal_data['datas_comemorativas'].startswith("Nenhuma") and not jornal_data['datas_comemorativas'].startswith("⚠️"):
-        # A função obter_datas_comemorativas já prefixa com `\- ` e escapa o conteúdo
-        tg_list.append(jornal_data['datas_comemorativas'])
-    else:
-        tg_list.append(escape_markdown_v2(jornal_data['datas_comemorativas']))
+    # --- Datas Comemorativas ---
+    tg_list.append(f"*{escape_markdown_v2(f'🗓️ Datas Comemorativas - {data_display_str}')}*")
+    datas_comemorativas_str = jornal_data['datas_comemorativas']
+    # A função obter_datas_comemorativas já formata com \- e escapa
+    tg_list.append(datas_comemorativas_str)
     tg_list.append(escape_markdown_v2("--------------------"))
     
+    # --- Cotações ---
     tg_list.append(f"*{escape_markdown_v2('💹 Cotações')}*")
-    tg_list.append(f"◦ *Dólar \\(USD\\):* R\\$ {escape_markdown_v2(jornal_data['cotacoes']['dolar'])}")
-    tg_list.append(f"◦ *Euro \\(EUR\\):* R\\$ {escape_markdown_v2(jornal_data['cotacoes']['euro'])}")
-    tg_list.append(f"◦ *Ethereum \\(ETH\\):* {jornal_data['cotacoes']['eth_str_tg']}") # Já inclui R$ e é escapado
-    tg_list.append(f"◦ *Bitcoin \\(BTC\\):* {jornal_data['cotacoes']['btc_str_tg']}")   # Já inclui R$ e é escapado
+    dolar_val = escape_markdown_v2(jornal_data['cotacoes']['dolar'])
+    euro_val = escape_markdown_v2(jornal_data['cotacoes']['euro'])
+    # Para MarkdownV2, parênteses literais precisam ser escapados
+    tg_list.append(f"◦ *Dólar \\(USD\\):* R\\$ {dolar_val}") 
+    tg_list.append(f"◦ *Euro \\(EUR\\):* R\\$ {euro_val}")   
+
+    eth_str_tg_val = escape_markdown_v2(jornal_data['cotacoes']['eth_str_tg'])
+    btc_str_tg_val = escape_markdown_v2(jornal_data['cotacoes']['btc_str_tg'])
+    tg_list.append(f"◦ *Ethereum \\(ETH\\):* {eth_str_tg_val}") 
+    tg_list.append(f"◦ *Bitcoin \\(BTC\\):* {btc_str_tg_val}")
     tg_list.append(f"_{escape_markdown_v2('Cripto: Dados por CoinGecko')}_")
     tg_list.append(escape_markdown_v2("--------------------"))
 
+    # --- Notícias ---
     for secao_titulo, artigos_ou_msg in jornal_data['noticias'].items():
         tg_list.append(f"*{escape_markdown_v2(secao_titulo)}*")
-        if isinstance(artigos_ou_msg, str):
+        if isinstance(artigos_ou_msg, str): # Mensagem de erro/aviso
             tg_list.append(escape_markdown_v2(artigos_ou_msg))
-        else:
+        else: # Lista de artigos
             for artigo in artigos_ou_msg:
                 titulo_escaped = escape_markdown_v2(artigo['title'])
                 fonte_escaped = escape_markdown_v2(artigo['source'])
                 tg_list.append(f"📰 *{titulo_escaped}*")
                 tg_list.append(f"_{escape_markdown_v2('Fonte:')} {fonte_escaped}_")
-                if artigo['description']:
-                    # Usar blockquote para descrição, escapando o conteúdo interno
+                if artigo['description']: # Garante que description não é None
                     descricao_limpa = artigo['description'].replace('\r\n', '\n').replace('\r', '\n')
-                    linhas_descricao = [f"> {escape_markdown_v2(linha)}" for linha in descricao_limpa.split('\n')]
-                    tg_list.append("\n".join(linhas_descricao))
+                    linhas_descricao_escapadas = [f"> {escape_markdown_v2(linha.strip())}" for linha in descricao_limpa.split('\n') if linha.strip()]
+                    if linhas_descricao_escapadas:
+                        tg_list.append("\n".join(linhas_descricao_escapadas))
                 if artigo['url']:
-                    tg_list.append(f"[🔗 Ver notícia completa]({artigo['url']})") 
+                    tg_list.append(f"[{escape_markdown_v2('🔗 Ver notícia completa')}]({artigo['url']})") 
                 tg_list.append("") 
         tg_list.append(escape_markdown_v2("--------------------"))
     
+    # --- Fake News ---
     tg_list.append(f"*{escape_markdown_v2('🛑 Fake News Desmentida')}*")
     boato_data = jornal_data['fake_news']
-    if isinstance(boato_data, dict):
+    if isinstance(boato_data, dict): 
         tg_list.append(f"*{escape_markdown_v2(boato_data['title'])}*")
-        tg_list.append(f"[🔗 Leia mais]({boato_data['link']})")
-    else: # String de erro/aviso
+        tg_list.append(f"[{escape_markdown_v2('🔗 Leia mais')}]({boato_data['link']})")
+    else: 
         tg_list.append(escape_markdown_v2(boato_data))
     tg_list.append(f"_{escape_markdown_v2('Fonte: Boatos.org (Feed RSS)')}_")
     tg_list.append(escape_markdown_v2("--------------------"))
 
+    # --- Agradecimento ---
     tg_list.append(f"*{escape_markdown_v2('🙏 Apoie o Juninho News!')}*")
     tg_list.append(escape_markdown_v2("Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙"))
     tg_list.append(f"*{escape_markdown_v2('Chave Pix:')}* `{escape_markdown_v2('64992115946')}`")
@@ -372,21 +415,18 @@ def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
     if len(message_text) > max_length:
         logging.warning(f"Mensagem ({len(message_text)} caracteres) excede o limite de {max_length}. Será dividida.")
         current_part = ""
-        # Tenta dividir por blocos delimitados por "--------------------" ou por linhas se muito grande
-        # Esta lógica de divisão pode ser aprimorada
-        for line in message_text.splitlines(keepends=True):
+        for line in message_text.splitlines(keepends=True): # Mantém newlines para a divisão
             if len(current_part) + len(line) <= max_length:
                 current_part += line
             else:
-                if current_part:
+                if current_part: 
                     messages_to_send.append(current_part)
                 current_part = line
-        if current_part:
+        if current_part: 
             messages_to_send.append(current_part)
         
-        if not messages_to_send and message_text: # Se a primeira parte já é muito longa
-            messages_to_send.append(message_text[:max_length - 20] + "\n\\.\\.\\.\\[continua\\]")
-
+        if not messages_to_send and message_text: 
+             messages_to_send.append(message_text[:max_length - 20] + "\n\\.\\.\\.\\[continua\\]")
     else:
         messages_to_send.append(message_text)
 
@@ -398,24 +438,24 @@ def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
             'chat_id': chat_id,
             'text': part_message,
             'parse_mode': 'MarkdownV2',
-            'disable_web_page_preview': False # Habilita preview de links para notícias
+            'disable_web_page_preview': False 
         }
         try:
-            response = requests.post(send_url, data=payload, timeout=30) # Timeout aumentado
-            response_json = response.json() 
+            response = requests.post(send_url, data=payload, timeout=30)
+            response_json = {}
+            try:
+                response_json = response.json()
+            except json.JSONDecodeError: # Se a resposta não for JSON válido
+                logging.error(f"Resposta do Telegram não é JSON válido. Status: {response.status_code}, Resposta: {response.text[:200]}")
+            
             if response.status_code == 200 and response_json.get("ok"):
                 logging.info(f"Parte {i+1}/{len(messages_to_send)} enviada com sucesso para o Telegram (Chat ID: {chat_id}).")
             else:
                 logging.error(f"Falha ao enviar parte {i+1} para o Telegram. Status: {response.status_code}, Resposta: {response.text}")
                 all_sent_successfully = False
-            time.sleep(1.5) # Pausa maior entre o envio de múltiplas partes para evitar rate limit
+            time.sleep(1.5) 
         except requests.exceptions.RequestException as e:
             logging.exception(f"Exceção ao enviar parte {i+1} para o Telegram: {e}")
-            all_sent_successfully = False
-        except json.JSONDecodeError as e:
-            response_text_snippet = response.text[:200] if 'response' in locals() and hasattr(response, 'text') else "N/A"
-            status_code_snippet = response.status_code if 'response' in locals() and hasattr(response, 'status_code') else "N/A"
-            logging.error(f"Erro ao decodificar JSON da resposta do Telegram para parte {i+1}. Status: {status_code_snippet}, Resposta: {response_text_snippet}, Erro: {e}")
             all_sent_successfully = False
     return all_sent_successfully
 
@@ -426,8 +466,6 @@ def main_automated():
     
     if not all([NEWS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
         logging.critical("ERRO CRÍTICO: Variáveis de ambiente NEWS_API_KEY, TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não estão configuradas!")
-        # Em um ambiente de servidor, não adianta imprimir para o console, mas o log é importante.
-        # Se precisar de uma notificação de falha, poderia enviar um email de erro ou uma mensagem para um chat de admin no Telegram.
         return
 
     current_time_obj = datetime.now(FUSO_BRASIL)
@@ -448,7 +486,7 @@ def main_automated():
             'btc_str_tg': f"R$ {btc_val:,.2f}" if btc_val is not None else "Erro/Indisponível",
         },
         'noticias': {},
-        'fake_news': get_boatos_org_feed() # Retorna dict ou string de erro
+        'fake_news': get_boatos_org_feed()
     }
 
     news_sections_queries = {
@@ -469,7 +507,7 @@ def main_automated():
         artigos, msg_erro = buscar_noticias_newsapi(query, max_articles=5)
         if msg_erro and not artigos:
              jornal_data['noticias'][titulo_secao] = msg_erro
-        elif not artigos and not msg_erro:
+        elif not artigos and not msg_erro: # Se não houve erro mas não encontrou artigos
              jornal_data['noticias'][titulo_secao] = f"Nenhuma notícia relevante para '{query}' no momento."
         else:
             jornal_data['noticias'][titulo_secao] = artigos
@@ -478,9 +516,12 @@ def main_automated():
     
     if not send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, telegram_message_text):
         logging.error("Falha CRÍTICA ao enviar a mensagem completa para o Telegram.")
-        # Em um servidor, você pode querer ter um fallback, como enviar um email de alerta.
+        # Para depuração, se rodar localmente, pode imprimir a mensagem
+        # print("\n--- MENSAGEM PARA TELEGRAM (FALHA NO ENVIO AUTOMÁTICO) ---\n")
+        # print(telegram_message_text)
     else:
         logging.info("Juninho News enviado com sucesso para o Telegram!")
+        # print("Juninho News enviado com sucesso para o Telegram!") # Útil para logs no console
 
 # --- Bloco de Execução Principal ---
 if __name__ == "__main__":
