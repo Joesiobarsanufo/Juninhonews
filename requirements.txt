@@ -1,0 +1,8 @@
+pandas
+openpyxl
+ephem
+requests
+beautifulsoup4
+pytz
+# Pillow (se alguma função futura usar, atualmente não é usado)
+# unidecode (se você for usar para normalizar texto em queries)
