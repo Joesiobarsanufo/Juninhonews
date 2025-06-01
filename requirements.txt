@@ -4,5 +4,6 @@ ephem
 requests
 beautifulsoup4
 pytz
-# Pillow (se alguma função futura usar, atualmente não é usado)
-# unidecode (se você for usar para normalizar texto em queries)
+lxml  # <--- Adicione esta linha
+# Pillow (se for usar no futuro)
+# unidecode (se for usar no futuro)
