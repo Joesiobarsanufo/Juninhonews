@@ -21,11 +21,11 @@ EXCHANGE_RATE_API_KEY = os.getenv('EXCHANGE_RATE_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-USER_AGENT = "JuninhoNewsBot/1.9 (Automated Script)"
+USER_AGENT = "JuninhoNewsBot/1.10 (Automated Script)" # Versão incrementada
 FUSO_BRASIL = pytz.timezone('America/Sao_Paulo')
 FILE_PATH_DATAS_COMEMORATIVAS = "datas comemorativas.xlsx"
 
-# --- Funções Utilitárias e de Busca ---
+# --- Funções Utilitárias e de Busca (mantidas e ajustadas onde necessário) ---
 
 def safe_request_get(url, params=None, timeout=10, max_retries=2, delay_seconds=2):
     headers = {'User-Agent': USER_AGENT}
@@ -108,6 +108,7 @@ def obter_datas_comemorativas(file_path: str, sheet_name='tabela') -> str:
         data_atual_obj = datetime.now(FUSO_BRASIL).date()
         datas_hoje = df[df['Data'].dt.date == data_atual_obj]
         if not datas_hoje.empty:
+            # Para o estilo plain text, cada item em uma nova linha com "-"
             return "\n".join(f"- {row['Descricao']}" for _, row in datas_hoje.iterrows())
         return f"Nenhuma data comemorativa listada para hoje ({data_atual_obj.strftime('%d/%m')})."
     except Exception as e:
@@ -132,12 +133,12 @@ def get_biblical_verse() -> str:
     if response:
         try:
             response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, 'xml') # Requer lxml
+            soup = BeautifulSoup(response.text, 'xml') 
             verse_text_tag, reference_tag = soup.find("text"), soup.find("reference")
             if verse_text_tag and reference_tag:
                 return f"{html.unescape(verse_text_tag.text.strip())} ({html.unescape(reference_tag.text.strip())})"
         except Exception as e: logging.exception(f"Erro ao processar XML da Bible Gateway: {e}")
-    return "Não foi possível obter o versículo." # Mensagem mais genérica
+    return "Não foi possível obter o versículo."
 
 def get_quote_pensador() -> str:
     url = "https://www.pensador.com/frases_de_pensadores_famosos/"
@@ -157,14 +158,14 @@ def get_quote_pensador() -> str:
                     if autor_el_span : autor = autor_el_span.text.strip()
                 return f'"{texto_frase}"{f" - {autor}" if autor else ""}'
         except Exception as e: logging.exception(f"Erro ao processar HTML do Pensador.com: {e}")
-    return "⚠️ Nenhuma frase encontrada." # Mensagem mais genérica
+    return "⚠️ Nenhuma frase encontrada."
 
 def get_boatos_org_feed() -> dict | str :
     url = "https://www.boatos.org/feed"
     response = safe_request_get(url)
     if response:
         try:
-            soup = BeautifulSoup(response.content, 'xml') # Requer lxml
+            soup = BeautifulSoup(response.content, 'xml') 
             items = soup.find_all("item")
             if items:
                 boato = random.choice(items)
@@ -227,10 +228,6 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
 # --- Funções do Telegram ---
 
 def escape_markdown_v2(text: str | None) -> str:
-    # Esta função ainda é útil se você decidir usar parse_mode: 'MarkdownV2'
-    # para ter mais controle sobre a formatação (ex: negrito seletivo).
-    # Para uma saída "plain text" onde o Telegram auto-linka, ela é menos crítica,
-    # mas não prejudica escapar o conteúdo para evitar interpretações acidentais.
     if text is None: text = ""
     if not isinstance(text, str): text = str(text)
     escape_chars = r'_*[]()~`>#+-=|{}.!'
@@ -241,47 +238,71 @@ def escape_markdown_v2(text: str | None) -> str:
     return "".join(res)
 
 def formatar_para_telegram_plain(jornal_data: dict) -> str:
+    """Formata os dados do jornal para um estilo que se assemelha ao plain text
+       original, mas usa MarkdownV2 para links nos títulos.
+    """
     plain_list = []
-    data_display = jornal_data["data_display"]
+    data_display = jornal_data["data_display"] # Não precisa escapar aqui, usado abaixo
     fase_lua = jornal_data["fase_lua"]
     
-    plain_list.append(f"📰 Juninho News - {data_display}")
-    plain_list.append(f"📌 De Pires do Rio-GO")
-    plain_list.append(f"🌒 {fase_lua}")
+    # Cabeçalho
+    titulo_news_interno = f'Juninho News - {data_display}'
+    plain_list.append(f"📰 *{escape_markdown_v2(titulo_news_interno)}*") # Título principal em negrito
+
+    local_interno = f'📌 De Pires do Rio-GO'
+    plain_list.append(f"_{escape_markdown_v2(local_interno)}_") # Itálico
+
+    fase_lua_texto_interno = f'🌒 Fase da Lua: {fase_lua}'
+    plain_list.append(f"_{escape_markdown_v2(fase_lua_texto_interno)}_") # Itálico
     plain_list.append("")
 
-    plain_list.append(f"💭 Frase de Hoje")
-    plain_list.append(jornal_data['frase_dia'])
+    # Frase e Versículo
+    plain_list.append(f"💭 *{escape_markdown_v2('Frase de Hoje')}*")
+    plain_list.append(f"_{escape_markdown_v2(jornal_data['frase_dia'])}_")
     plain_list.append("")
-    plain_list.append(f"📖 Versículo do Dia")
-    plain_list.append(jornal_data['versiculo_dia'])
+    plain_list.append(f"📖 *{escape_markdown_v2('Versículo do Dia')}*")
+    plain_list.append(f"_{escape_markdown_v2(jornal_data['versiculo_dia'])}_")
+    plain_list.append(f"_{escape_markdown_v2('Fonte: Bible Gateway (ARC)')}_") # Fonte do versículo
     plain_list.append("") 
 
-    plain_list.append("🙏 Agradecemos por acompanhar nosso jornal")
-    plain_list.append("!Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙")
-    plain_list.append("📌 Chave Pix: 64992115946")
-    plain_list.append("Seu apoio nos ajuda a continuar trazendo informações com qualidade e dedicação. Obrigado! 😊")
+    # Agradecimento
+    plain_list.append(f"🙏 *{escape_markdown_v2('Agradecemos por acompanhar nosso jornal')}*")
+    plain_list.append(escape_markdown_v2("!Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙"))
+    plain_list.append(f"📌 *{escape_markdown_v2('Chave Pix:')}* `{escape_markdown_v2('64992115946')}`") # Monospace
+    plain_list.append(escape_markdown_v2("Seu apoio nos ajuda a continuar trazendo informações com qualidade e dedicação. Obrigado! 😊"))
     plain_list.append("")
 
-    plain_list.append(f"🗓 HOJE É DIA... {data_display}:")
-    plain_list.append(jornal_data['datas_comemorativas']) 
+    # Datas Comemorativas
+    datas_comemorativas_titulo_interno = f'HOJE É DIA... {data_display}:'
+    plain_list.append(f"🗓 *{escape_markdown_v2(datas_comemorativas_titulo_interno)}*")
+    # obter_datas_comemorativas retorna "- Descrição"
+    # Para MarkdownV2, o hífen precisa ser escapado se for literal no início da linha,
+    # ou usar a formatação de lista do Markdown (que o Telegram pode não renderizar bem de forma aninhada)
+    # Vamos escapar o conteúdo da descrição e manter o hífen.
+    linhas_datas = [escape_markdown_v2(line) for line in jornal_data['datas_comemorativas'].splitlines()]
+    plain_list.append("\n".join(linhas_datas))
     plain_list.append("")
     
-    plain_list.append(f" 💵 Cotação do Dólar")
-    plain_list.append(f" R$ {jornal_data['cotacoes']['dolar']}")
+    # Cotações
+    plain_list.append(f"💹 *{escape_markdown_v2('Cotações')}*")
+    plain_list.append(f" 💵 {escape_markdown_v2('Cotação do Dólar')}")
+    plain_list.append(f" {escape_markdown_v2(f'R$ {jornal_data["cotacoes"]["dolar"]}')}")
     plain_list.append("")
-    plain_list.append(f"💶 Cotação do Euro")
-    plain_list.append(f" R$ {jornal_data['cotacoes']['euro']}")
+    plain_list.append(f"💶 {escape_markdown_v2('Cotação do Euro')}")
+    plain_list.append(f" {escape_markdown_v2(f'R$ {jornal_data["cotacoes"]["euro"]}')}")
     plain_list.append("")
-    plain_list.append(f"🪙 Cotação do Ethereum")
-    plain_list.append(f" R${jornal_data['cotacoes']['eth_plain_str']}") 
+    plain_list.append(f"🪙 {escape_markdown_v2('Cotação do Ethereum')}")
+    plain_list.append(f" {escape_markdown_v2(f"R${jornal_data['cotacoes']['eth_plain_str']}")}")
     plain_list.append("")
-    plain_list.append(f"🪙 Cotação do Bitcoin")
-    plain_list.append(f" R$ {jornal_data['cotacoes']['btc_plain_str']}")
+    plain_list.append(f"🪙 {escape_markdown_v2('Cotação do Bitcoin')}")
+    plain_list.append(f" {escape_markdown_v2(f"R$ {jornal_data['cotacoes']['btc_plain_str']}")}")
+    plain_list.append(f"_{escape_markdown_v2('Cripto: Dados por CoinGecko')}_") # Atribuição
     plain_list.append("")
 
+    # Notícias
     for secao_titulo_com_emoji, artigos_ou_msg in jornal_data['noticias'].items():
-        plain_list.append(f"\n{secao_titulo_com_emoji}  ") 
+        plain_list.append(f"\n*{escape_markdown_v2(secao_titulo_com_emoji)}*") 
+        
         nome_secao_limpo = secao_titulo_com_emoji
         for emoji_char in "🇧🇷🟢🌍🌐⚽💰🍀🌟✈️🏆💻": nome_secao_limpo = nome_secao_limpo.replace(emoji_char, "")
         nome_secao_limpo = nome_secao_limpo.replace("(", "").replace(")", "").replace("&", "e").replace("Estado", "").strip()
@@ -290,32 +311,38 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
         if "Geopolitica" in nome_secao_limpo: sub_titulo_texto = f"Últimas notícias da Geopolítica mundial:"
         elif "INTERNACIONAL" in secao_titulo_com_emoji: sub_titulo_texto = "Últimas notícias internacionais e do mundo:"
         else: sub_titulo_texto = f"Últimas notícias de {nome_secao_limpo}:"
-        plain_list.append(f"📢 {sub_titulo_texto}\n")
+        plain_list.append(f"📢 {escape_markdown_v2(sub_titulo_texto)}\n")
             
         if isinstance(artigos_ou_msg, str):
-            plain_list.append(artigos_ou_msg) # Mensagens de erro já vêm formatadas ou são simples
+            plain_list.append(escape_markdown_v2(artigos_ou_msg))
         else:
             for artigo in artigos_ou_msg:
-                plain_list.append(f"📰 {artigo['title']}") # Conteúdo direto
-                plain_list.append(f"🏷 Fonte: {artigo['source']}")
+                escaped_title = escape_markdown_v2(artigo['title'])
+                if artigo['url']:
+                    # Título como Hiperlink MarkdownV2
+                    plain_list.append(f"📰 [{escaped_title}]({artigo['url']})")
+                else:
+                    plain_list.append(f"📰 {escaped_title}") # Sem link se URL não existir
+
+                plain_list.append(f"🏷 _{escape_markdown_v2('Fonte:')} {escape_markdown_v2(artigo['source'])}_")
                 if artigo['description']:
                     desc_limpa = artigo['description'].replace('\r\n', '\n').replace('\r', '\n')
-                    plain_list.append(f"📝 {desc_limpa}")
-                if artigo['url']:
-                    # MODIFICADO para ser mais explícito e ajudar na cópia para WhatsApp
-                    plain_list.append(f"🔗 Link: {artigo['url']}") 
+                    plain_list.append(f"📝 _{escape_markdown_v2(desc_limpa)}_") # Descrição em itálico
+                # A linha de link separada não é mais necessária se o título é o link
                 plain_list.append("") 
         plain_list.append("") 
     
-    plain_list.append(f"🔎 #FAKENEWS ") 
+    # Fake News
+    plain_list.append(f"🔎 *{escape_markdown_v2('#FAKENEWS')}*") 
     boato_data = jornal_data['fake_news']
     if isinstance(boato_data, dict):
-        plain_list.append(f"🛑 Fake News desmentida:")
-        plain_list.append(f"📢 {boato_data['title']}")
-        # MODIFICADO para ser mais explícito
-        plain_list.append(f"🔗 Link: {boato_data['link']}") 
+        plain_list.append(f"🛑 _{escape_markdown_v2('Fake News desmentida:')}_")
+        # Título do boato como Hiperlink MarkdownV2
+        escaped_boato_title = escape_markdown_v2(boato_data['title'])
+        plain_list.append(f"📢 [{escaped_boato_title}]({boato_data['link']})")
     else: 
-        plain_list.append(boato_data)
+        plain_list.append(escape_markdown_v2(boato_data))
+    plain_list.append(f"_{escape_markdown_v2('Fonte: Boatos.org (Feed RSS)')}_")
     plain_list.append("")
     
     return "\n".join(plain_list)
@@ -339,18 +366,19 @@ def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
         for part in temp_parts:
             if len(part) > max_length:
                 logging.warning(f"Sub-parte da mensagem ({len(part)}) ainda excede limite. Será truncada.")
-                messages_to_send.append(part[:max_length - 30] + "\n...[mensagem cortada]...")
+                messages_to_send.append(part[:max_length - 30] + "\n" + escape_markdown_v2("...[mensagem cortada]..."))
             else: messages_to_send.append(part)
         if not messages_to_send and message_text: 
-             messages_to_send.append(message_text[:max_length - 30] + "\n...[mensagem cortada]...")
+             messages_to_send.append(message_text[:max_length - 30] + "\n" + escape_markdown_v2("...[mensagem cortada]..."))
     else: messages_to_send.append(message_text)
 
     all_sent_successfully = True
     for i, part_message in enumerate(messages_to_send):
         if not part_message.strip(): continue
-        # Removido parse_mode para envio como texto o mais simples possível.
-        # Telegram ainda deve auto-linkar URLs.
-        payload = {'chat_id': chat_id, 'text': part_message, 'disable_web_page_preview': False}
+        # REINSERIDO parse_mode: 'MarkdownV2' para suportar links nos títulos
+        payload = {'chat_id': chat_id, 'text': part_message, 
+                   'parse_mode': 'MarkdownV2', 
+                   'disable_web_page_preview': False}
         try:
             response = requests.post(send_url, data=payload, timeout=30)
             response_json = {}
@@ -415,6 +443,8 @@ def main_automated():
 
     telegram_message_text = formatar_para_telegram_plain(jornal_data)
     
+    # print(telegram_message_text) # Descomente para debug local da mensagem formatada
+
     if not send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, telegram_message_text):
         logging.error("Falha CRÍTICA ao enviar a mensagem completa para o Telegram.")
     else:
