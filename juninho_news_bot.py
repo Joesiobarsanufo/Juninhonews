@@ -21,11 +21,11 @@ EXCHANGE_RATE_API_KEY = os.getenv('EXCHANGE_RATE_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-USER_AGENT = "JuninhoNewsBot/1.3 (Automated Script)" # Versão incrementada
+USER_AGENT = "JuninhoNewsBot/1.4 (Automated Script)" # Versão incrementada
 FUSO_BRASIL = pytz.timezone('America/Sao_Paulo')
 FILE_PATH_DATAS_COMEMORATIVAS = "datas comemorativas.xlsx"
 
-# --- Funções Utilitárias e de Busca (mantidas da versão anterior) ---
+# --- Funções Utilitárias e de Busca ---
 
 def safe_request_get(url, params=None, timeout=10, max_retries=2, delay_seconds=2):
     headers = {'User-Agent': USER_AGENT}
@@ -66,21 +66,29 @@ def fase_da_lua(data_str_ephem_format: str) -> str:
         date_observer = ephem.Date(data_str_ephem_format)
         moon = ephem.Moon(date_observer)
         illumination = moon.phase
+        
         prev_date = ephem.Date(date_observer - 1)
         moon_prev = ephem.Moon(prev_date)
-        is_waxing = illumination > moon_prev.phase
+        # Determina se a lua está crescendo comparando iluminação com dia anterior
+        # Pode não ser perfeito para os dias exatos dos quartos, mas é uma boa aproximação
+        is_waxing = illumination > moon_prev.phase if illumination > 1 and illumination < 99 else date_observer < ephem.next_full_moon(date_observer) < ephem.next_new_moon(date_observer)
+
 
         if illumination < 3: return "Lua Nova 🌑"
         if illumination > 97: return "Lua Nova (final) 🌑" 
-        if illumination >= 47 and illumination <= 53: return "Lua Cheia 🌕"
-        if illumination >= 22 and illumination <= 28:
+        if illumination >= 48 and illumination <= 52: return "Lua Cheia 🌕" # Faixa mais justa para Cheia
+        
+        # Para quartos, centralizamos em 25% e 75%
+        if illumination >= 23 and illumination <= 27:
             return "Quarto Crescente 🌓" if is_waxing else "Quarto Minguante 🌗"
+        
         if is_waxing:
-            if illumination < 22: return "Lua Crescente Côncava 🌒"
-            if illumination < 47: return "Lua Crescente Gibosa 🌔"
-        else: 
-            if illumination > 78: return "Lua Minguante Côncava 🌘"
-            if illumination > 53: return "Lua Minguante Gibosa 🌖"
+            if illumination < 23: return "Lua Crescente Côncava 🌒" # Antes do Quarto Crescente
+            if illumination < 48: return "Lua Crescente Gibosa 🌔"  # Depois do Quarto Crescente, antes da Cheia
+        else: # Minguante
+            if illumination > 77: return "Lua Minguante Côncava 🌘" # Depois do Quarto Minguante, antes da Nova
+            if illumination > 52: return "Lua Minguante Gibosa 🌖"  # Depois da Cheia, antes do Quarto Minguante
+        
         logging.warning(f"Fase da lua com iluminação {illumination}% e is_waxing={is_waxing} não encaixou, usando fallback.")
         return "Fase Crescente (genérico) 🌔" if is_waxing else "Fase Minguante (genérico) 🌖"
     except Exception as e:
@@ -90,11 +98,9 @@ def fase_da_lua(data_str_ephem_format: str) -> str:
 def obter_datas_comemorativas(file_path: str, sheet_name='tabela') -> str:
     try:
         if not os.path.exists(file_path):
-            logging.warning(f"Arquivo de datas comemorativas não encontrado: {file_path}")
-            return escape_markdown_v2("⚠️ Arquivo de datas comemorativas não encontrado.") # Escapa a msg de erro
+            return escape_markdown_v2("⚠️ Arquivo de datas comemorativas não encontrado.")
         df = pd.read_excel(file_path, sheet_name=sheet_name)
         if df.empty or len(df.columns) < 2:
-            logging.warning(f"Arquivo de datas '{file_path}' vazio ou formato incorreto.")
             return escape_markdown_v2("⚠️ Arquivo de datas vazio ou mal formatado.")
         df.columns = ['DataRaw', 'DescricaoRaw'] + list(df.columns[2:])
         df['Data'] = pd.to_datetime(df['DataRaw'], errors='coerce')
@@ -143,10 +149,16 @@ def get_quote_pensador() -> str:
             soup = BeautifulSoup(response.text, "html.parser")
             frases_tags = soup.select("p.frase")
             if frases_tags:
-                frase = random.choice(frases_tags).text.strip()
-                autor_tag = random.choice(frases_tags).find_next_sibling("p", class_="autor")
-                autor = autor_tag.find('a').text.strip() if autor_tag and autor_tag.find('a') else None
-                return f'"{frase}"{f" - {autor}" if autor else ""}'
+                frase_el = random.choice(frases_tags)
+                texto_frase = frase_el.text.strip()
+                autor = None
+                # Tenta encontrar autor em diferentes estruturas
+                autor_el_p = frase_el.find_next_sibling("p", class_="autor")
+                if autor_el_p and autor_el_p.find('a'): autor = autor_el_p.find('a').text.strip()
+                if not autor : 
+                    autor_el_span = frase_el.find_parent().find("span", class_="autor")
+                    if autor_el_span : autor = autor_el_span.text.strip()
+                return f'"{texto_frase}"{f" - {autor}" if autor else ""}'
             return "⚠️ Nenhuma frase encontrada (layout pode ter mudado)."
         except Exception as e: logging.exception(f"Erro ao processar HTML do Pensador.com: {e}")
     return "❌ Erro ao buscar frase no Pensador.com."
@@ -206,7 +218,7 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
             titulo = art_api.get('title')
             if not titulo or "[Removed]" in titulo or titulo in titulos_exibidos: continue
             titulos_exibidos.add(titulo)
-            desc = art_api.get('description', "") # Garante que é string
+            desc = art_api.get('description', "") 
             if len(desc) > 200: desc = desc[:197].strip() + "..."
             articles_data.append({"title": titulo, "source": art_api.get('source', {}).get('name', 'N/A'), "description": desc, "url": art_api.get('url')})
             if len(articles_data) >= max_articles: break
@@ -219,83 +231,102 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
 
 # --- Funções do Telegram ---
 
-def escape_markdown_v2(text: str | None) -> str: # Permite None como entrada
-    if text is None: text = "" # Trata None como string vazia
+def escape_markdown_v2(text: str | None) -> str:
+    if text is None: text = ""
     if not isinstance(text, str): text = str(text)
-    # Caracteres a serem escapados no MarkdownV2 do Telegram
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return "".join(f'\\{char}' if char in escape_chars else char for char in text)
 
 def formatar_para_telegram(jornal_data: dict) -> str:
     tg_list = []
-    data_display_str_escaped = escape_markdown_v2(jornal_data["data_display"]) # Escapa uma vez
+    data_display_str = jornal_data["data_display"] # Não precisa escapar aqui, será escapado abaixo
     
     # Cabeçalho
-    tg_list.append(f"*{escape_markdown_v2('📰 Juninho News -')} {data_display_str_escaped}*")
-    tg_list.append(f"_{escape_markdown_v2('📌 De Pires do Rio-GO')}_")
-    tg_list.append(f"_{escape_markdown_v2(f'🌒 Fase da Lua: {jornal_data["fase_lua"]}')}_")
-    tg_list.append(escape_markdown_v2("--------------------"))
+    titulo_formatado = escape_markdown_v2(f'📰 Juninho News - {data_display_str}')
+    tg_list.append(f"*{titulo_formatado}*")
+    
+    local_formatado = escape_markdown_v2(f'📌 De Pires do Rio-GO')
+    tg_list.append(f"_{local_formatado}_")
+
+    # CORRIGIDO: Evitar f-string aninhada que causa SyntaxError
+    fase_lua_texto_interno = f'🌒 Fase da Lua: {jornal_data["fase_lua"]}'
+    fase_lua_formatado = escape_markdown_v2(fase_lua_texto_interno)
+    tg_list.append(f"_{fase_lua_formatado}_")
+    tg_list.append(escape_markdown_v2("\n--------------------\n")) # Adiciona newlines para separador
 
     # Frase e Versículo
     tg_list.append(f"*{escape_markdown_v2('💭 Frase de Hoje')}*")
     tg_list.append(f"_{escape_markdown_v2(jornal_data['frase_dia'])}_")
-    tg_list.append(f"\n*{escape_markdown_v2('📖 Versículo do Dia')}*")
+    tg_list.append(f"\n*{escape_markdown_v2('📖 Versículo do Dia')}*") # \n para espaço
     tg_list.append(f"_{escape_markdown_v2(jornal_data['versiculo_dia'])}_")
     tg_list.append(f"_{escape_markdown_v2('Fonte: Bible Gateway (ARC)')}_")
-    tg_list.append(escape_markdown_v2("--------------------"))
+    tg_list.append(escape_markdown_v2("\n--------------------\n"))
 
     # Datas Comemorativas
-    tg_list.append(f"*{escape_markdown_v2(f'🗓️ Datas Comemorativas - {jornal_data["data_display"]}')}*")
-    tg_list.append(jornal_data['datas_comemorativas']) # Já formatado e escapado por obter_datas_comemorativas
-    tg_list.append(escape_markdown_v2("--------------------"))
+    tg_list.append(f"*{escape_markdown_v2(f'🗓️ HOJE É DIA... {data_display_str}')}*") # Usando o layout original
+    # obter_datas_comemorativas agora retorna texto já escapado e formatado com \-
+    tg_list.append(jornal_data['datas_comemorativas']) 
+    tg_list.append(escape_markdown_v2("\n--------------------\n"))
     
     # Cotações
     tg_list.append(f"*{escape_markdown_v2('💹 Cotações')}*")
-    # Dólar e Euro já são strings (valor ou msg de erro) de get_exchange_rate_api
-    tg_list.append(f"◦ *Dólar \\(USD\\):* R\\$ {escape_markdown_v2(jornal_data['cotacoes']['dolar'])}")
-    tg_list.append(f"◦ *Euro \\(EUR\\):* R\\$ {escape_markdown_v2(jornal_data['cotacoes']['euro'])}")
-    # ETH e BTC já são strings formatadas com "R$ " ou msg de erro
-    tg_list.append(f"◦ *Ethereum \\(ETH\\):* {escape_markdown_v2(jornal_data['cotacoes']['eth_str_tg'])}")
-    tg_list.append(f"◦ *Bitcoin \\(BTC\\):* {escape_markdown_v2(jornal_data['cotacoes']['btc_str_tg'])}")
+    tg_list.append(f"◦ {escape_markdown_v2('💵 Cotação do Dólar')}") # Mantendo o layout original
+    tg_list.append(f"  {escape_markdown_v2(f'R$ {jornal_data["cotacoes"]["dolar"]}')}") # Indentado
+    tg_list.append(f"◦ {escape_markdown_v2('💶 Cotação do Euro')}")
+    tg_list.append(f"  {escape_markdown_v2(f'R$ {jornal_data["cotacoes"]["euro"]}')}") # Indentado
+    tg_list.append(f"◦ {escape_markdown_v2('🪙 Cotação do Ethereum')}")
+    tg_list.append(f"  {escape_markdown_v2(jornal_data['cotacoes']['eth_str_tg'])}") # Indentado
+    tg_list.append(f"◦ {escape_markdown_v2('🪙 Cotação do Bitcoin')}")
+    tg_list.append(f"  {escape_markdown_v2(jornal_data['cotacoes']['btc_str_tg'])}") # Indentado
     tg_list.append(f"_{escape_markdown_v2('Cripto: Dados por CoinGecko')}_")
-    tg_list.append(escape_markdown_v2("--------------------"))
+    tg_list.append(escape_markdown_v2("\n--------------------\n"))
 
     # Notícias
     for secao_titulo, artigos_ou_msg in jornal_data['noticias'].items():
-        tg_list.append(f"*{escape_markdown_v2(secao_titulo)}*")
+        tg_list.append(f"\n*{escape_markdown_v2(secao_titulo)}*") # Adiciona newline antes do título da seção
+        # Adiciona a linha "📢 Últimas notícias..." do layout original
+        sub_titulo_secao = escape_markdown_v2(f"📢 Últimas notícias sobre {secao_titulo.split(' ')[1]}" if len(secao_titulo.split(' ')) > 1 else f"📢 Últimas notícias de {secao_titulo.split(' ')[0]}")
+        # Remove emojis do subtitulo se existirem, pois já estão no título principal da seção
+        for emoji in "🇧🇷🏴🌍🌐⚽💰🍀🌟✈️🏆💻": sub_titulo_secao = sub_titulo_secao.replace(emoji, "")
+        sub_titulo_secao = sub_titulo_secao.replace("  ", " ").strip() # Limpa espaços extras
+        tg_list.append(sub_titulo_secao + (" mundial:" if "Geopolitica" in secao_titulo else ":"))
+
+
         if isinstance(artigos_ou_msg, str):
             tg_list.append(escape_markdown_v2(artigos_ou_msg))
         else:
             for artigo in artigos_ou_msg:
-                tg_list.append(f"📰 *{escape_markdown_v2(artigo['title'])}*")
-                tg_list.append(f"_{escape_markdown_v2('Fonte:')} {escape_markdown_v2(artigo['source'])}_")
+                tg_list.append(f"\n📰 *{escape_markdown_v2(artigo['title'])}*") # \n para espaço entre notícias
+                tg_list.append(f"🏷 _{escape_markdown_v2('Fonte:')} {escape_markdown_v2(artigo['source'])}_")
                 if artigo['description']:
                     desc_limpa = artigo['description'].replace('\r\n', '\n').replace('\r', '\n')
-                    linhas_desc = [f"> {escape_markdown_v2(l.strip())}" for l in desc_limpa.split('\n') if l.strip()]
-                    if linhas_desc: tg_list.append("\n".join(linhas_desc))
+                    # Não usar blockquote para layout mais próximo do original
+                    linhas_desc = [escape_markdown_v2(l.strip()) for l in desc_limpa.split('\n') if l.strip()]
+                    if linhas_desc: tg_list.append(f"📝 {escape_markdown_v2(' '.join(linhas_desc))}") # Emoji de nota
                 if artigo['url']:
-                    tg_list.append(f"{escape_markdown_v2('🔗 Link:')} {artigo['url']}") # URL não é escapada
-                tg_list.append("") 
-        tg_list.append(escape_markdown_v2("--------------------"))
+                    tg_list.append(f"🔗 {artigo['url']}") # URL não é escapada, Telegram auto-linka
+        tg_list.append(escape_markdown_v2("\n--------------------\n"))
     
     # Fake News
-    tg_list.append(f"*{escape_markdown_v2('🛑 Fake News Desmentida')}*")
+    tg_list.append(f"\n*{escape_markdown_v2('🔎 #FAKENEWS')}*") # Usando o layout original
     boato_data = jornal_data['fake_news']
     if isinstance(boato_data, dict):
-        tg_list.append(f"*{escape_markdown_v2(boato_data['title'])}*")
-        tg_list.append(f"{escape_markdown_v2('🔗 Leia mais:')} {boato_data['link']}") # URL não é escapada
+        tg_list.append(f"🛑 _{escape_markdown_v2('Fake News desmentida:')}_")
+        tg_list.append(f"📢 *{escape_markdown_v2(boato_data['title'])}*")
+        tg_list.append(f"🔗 {boato_data['link']}")
     else: 
         tg_list.append(escape_markdown_v2(boato_data))
     tg_list.append(f"_{escape_markdown_v2('Fonte: Boatos.org (Feed RSS)')}_")
-    tg_list.append(escape_markdown_v2("--------------------"))
+    tg_list.append(escape_markdown_v2("\n--------------------\n"))
 
     # Agradecimento
-    tg_list.append(f"*{escape_markdown_v2('🙏 Apoie o Juninho News!')}*")
-    tg_list.append(escape_markdown_v2("Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙"))
-    tg_list.append(f"*{escape_markdown_v2('Chave Pix:')}* `{escape_markdown_v2('64992115946')}`")
+    tg_list.append(f"*{escape_markdown_v2('🙏 Agradecemos por acompanhar nosso jornal')}*")
+    tg_list.append(escape_markdown_v2("!Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙"))
+    tg_list.append(f"*{escape_markdown_v2('📌 Chave Pix:')}* `{escape_markdown_v2('64992115946')}`")
     tg_list.append(escape_markdown_v2("Seu apoio nos ajuda a continuar trazendo informações com qualidade e dedicação. Obrigado! 😊"))
     
     return "\n".join(tg_list)
+
 
 def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
     if not bot_token or not chat_id:
@@ -304,42 +335,48 @@ def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
     send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     max_length, messages_to_send = 4096, []
     
-    # Lógica de divisão de mensagens
     if len(message_text) > max_length:
         logging.warning(f"Mensagem ({len(message_text)} caracteres) excede limite. Será dividida.")
         current_part = ""
-        # Tenta dividir por blocos (separados por "--------------------") ou linhas
-        blocks = message_text.split(escape_markdown_v2("--------------------"))
-        reconstructed_message = []
-        for i, block_content in enumerate(blocks):
-            block_to_add = block_content
-            if i < len(blocks) -1 : # Adiciona o separador de volta, exceto para o último bloco
-                block_to_add += escape_markdown_v2("--------------------") + "\n"
+        # Tenta dividir por blocos (separados por "--------------------")
+        # Adiciona o separador de volta para a divisão ser mais natural
+        separator = escape_markdown_v2("\n--------------------\n") 
+        # Split pela string exata do separador
+        blocks_content = message_text.split(separator)
+        
+        for i, block_text in enumerate(blocks_content):
+            block_to_add = block_text
+            if i < len(blocks_content) - 1: # Adiciona separador de volta, exceto para o último bloco
+                block_to_add += separator
 
             if len(current_part) + len(block_to_add) <= max_length:
                 current_part += block_to_add
             else:
                 if current_part: messages_to_send.append(current_part)
-                # Se o próprio bloco for muito grande, ele será truncado pela lógica de envio de partes
-                current_part = block_to_add 
+                # Se o próprio bloco for muito grande, ele será tratado abaixo
+                current_part = block_to_add
+        
         if current_part: messages_to_send.append(current_part)
         
+        # Se ainda assim alguma parte for muito grande (ex: uma seção de notícias muito longa)
+        final_messages_to_send = []
+        for part in messages_to_send:
+            if len(part) > max_length:
+                logging.warning(f"Sub-parte da mensagem ({len(part)} caracteres) ainda excede o limite. Será truncada.")
+                # Trunca mantendo alguma informação
+                final_messages_to_send.append(part[:max_length - 30] + "\n" + escape_markdown_v2("...[mensagem cortada]..."))
+            else:
+                final_messages_to_send.append(part)
+        messages_to_send = final_messages_to_send
+
         if not messages_to_send and message_text: 
-             # Fallback se a primeira parte já for muito longa (improvável com divisão por blocos)
-             messages_to_send.append(message_text[:max_length - 20] + "\n" + escape_markdown_v2("...[continua]"))
+             messages_to_send.append(message_text[:max_length - 30] + "\n" + escape_markdown_v2("...[mensagem cortada]..."))
     else:
         messages_to_send.append(message_text)
 
     all_sent_successfully = True
     for i, part_message in enumerate(messages_to_send):
         if not part_message.strip(): continue
-        
-        # Trunca a parte se ainda for muito longa (última salvaguarda)
-        if len(part_message) > max_length:
-            logging.warning(f"Parte {i+1} da mensagem ({len(part_message)} caracteres) ainda excede o limite. Será truncada.")
-            part_message = part_message[:max_length - 20] + "\n" + escape_markdown_v2("...[truncado e continua]")
-
-
         payload = {'chat_id': chat_id, 'text': part_message, 'parse_mode': 'MarkdownV2', 'disable_web_page_preview': False}
         try:
             response = requests.post(send_url, data=payload, timeout=30)
@@ -352,7 +389,7 @@ def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
             else:
                 logging.error(f"Falha envio parte {i+1} Telegram. Status: {response.status_code}, Resp: {response.text}")
                 all_sent_successfully = False
-            time.sleep(1.5) 
+            time.sleep(2) # Pausa um pouco maior entre partes
         except requests.exceptions.RequestException as e:
             logging.exception(f"Exceção envio parte {i+1} Telegram: {e}")
             all_sent_successfully = False
@@ -385,15 +422,17 @@ def main_automated():
     }
 
     news_sections_queries = {
-        "🇧🇷 Brasil (Geral)": "Brasil", "🏴 Goiás": f"Goiás OR \"Estado de Goiás\" NOT \"Goiás Esporte Clube\"",
-        "🌍 Geopolítica": "Geopolítica OR \"Relações Internacionais\"", "🌐 Internacional": "Internacional OR Mundial NOT Brasil",
-        "⚽ Futebol": "Futebol Brasil OR \"Campeonato Brasileiro\" OR Libertadores OR \"Copa do Brasil\"",
-        "💰 Economia": "\"Economia Brasileira\" OR Inflação OR Selic OR IBGE OR BCB",
-        "🍀 Loterias": "\"Loterias Caixa\" OR Mega-Sena OR Quina OR Lotofácil",
-        "🌟 Fama & Entretenimento": "Celebridades OR Entretenimento OR Famosos Brasil",
-        "✈️ Turismo": "Turismo Brasil OR Viagens OR \"Pontos Turísticos\"",
-        "🏆 Outros Esportes": "Esportes Brasil -futebol NOT \"e-sports\"",
-        "💻 Tecnologia": "Tecnologia OR Inovação OR Inteligência Artificial OR Startups Brasil"
+        "🇧🇷 BRASIL GERAL 🇧🇷": "Brasil", 
+        "🏴󠁢󠁲󠁧󠁯󠁿 Goiás 🏴󠁢󠁲󠁧󠁯󠁿": f"Goiás OR \"Estado de Goiás\" NOT \"Goiás Esporte Clube\"",
+        "🌎 Geopolitica 🌍": "Geopolítica OR \"Relações Internacionais\"", 
+        "🌎 INTERNACIONAL 🌍": "Internacional OR Mundial NOT Brasil", # Mudança de emoji para diferenciar
+        "⚽ Futebol ⚽": "Futebol Brasil OR \"Campeonato Brasileiro\" OR Libertadores OR \"Copa do Brasil\"",
+        "💰 ECONOMIA & NEGÓCIOS 💲": "\"Economia Brasileira\" OR Inflação OR Selic OR IBGE OR BCB", # Mantendo emoji original
+        "🍀 LOTERIAS 🍀": "\"Loterias Caixa\" OR Mega-Sena OR Quina OR Lotofácil",
+        "🌟 FAMA & ENTRETENIMENTO 🎭": "Celebridades OR Entretenimento OR Famosos Brasil",
+        "🛳 TURISMO ✈️": "Turismo Brasil OR Viagens OR \"Pontos Turísticos\"", # Mantendo emoji original
+        "🏆 ESPORTES 🏆": "Esportes Brasil -futebol NOT \"e-sports\"", # Mantendo emoji original
+        "💻 Tecnologia 💻": "Tecnologia OR Inovação OR Inteligência Artificial OR Startups Brasil"
     }
 
     for titulo_secao, query in news_sections_queries.items():
@@ -404,6 +443,11 @@ def main_automated():
 
     telegram_message_text = formatar_para_telegram(jornal_data)
     
+    # Para depuração, pode ser útil imprimir a mensagem antes de enviar:
+    # print("--- MENSAGEM A SER ENVIADA PARA O TELEGRAM ---")
+    # print(telegram_message_text)
+    # print("--- FIM DA MENSAGEM ---")
+
     if not send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, telegram_message_text):
         logging.error("Falha CRÍTICA ao enviar a mensagem completa para o Telegram.")
     else:
