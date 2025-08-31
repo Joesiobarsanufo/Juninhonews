@@ -11,7 +11,7 @@ import pandas as pd
 import pytz
 import requests
 from bs4 import BeautifulSoup
-import yfinance as yf # <-- NOVA BIBLIOTECA IMPORTADA
+import yfinance as yf
 
 # --- Configuração básica de logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s')
@@ -35,7 +35,6 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # --- Funções Utilitárias e de Busca ---
-
 def safe_request_get(url, params=None, timeout=15, max_retries=2, delay_seconds=3):
     headers = {'User-Agent': USER_AGENT}
     for attempt in range(max_retries):
@@ -54,52 +53,52 @@ def safe_request_get(url, params=None, timeout=15, max_retries=2, delay_seconds=
     return None
 
 def get_yahoo_finance_commodities() -> dict[str, str] | str:
-    """Busca preços de commodities do Yahoo Finance, sem necessidade de chave de API."""
+    """Busca preços de commodities do Yahoo Finance, corrige as unidades e converte para BRL."""
     logging.info("Buscando dados de commodities no Yahoo Finance.")
     
-    # Dicionário com os "tickers" (símbolos) de commodities do Yahoo Finance
-    # ZC=F (Milho), ZS=F (Soja), BZ=F (Petróleo), KC=F (Café), GC=F (Ouro)
+    # Dicionário com nomes claros e os "tickers" do Yahoo Finance
     tickers = {
-        "Milho (futuros)": "ZC=F",
-        "Soja (futuros)": "ZS=F",
-        "Petróleo (Brent)": "BZ=F",
-        "Café (futuros)": "KC=F",
-        "Ouro": "GC=F"
+        "Milho (por bushel, ~25.4kg)": "ZC=F",
+        "Soja (por bushel, ~27.2kg)": "ZS=F",
+        "Café (por libra-peso, ~0.45kg)": "KC=F",
+        "Ouro (por onça troy, ~31.1g)": "GC=F",
+        "Petróleo (Brent, por barril)": "BZ=F"
     }
+    
+    # Lista de tickers cujos preços são em CENTAVOS em vez de dólares
+    tickers_in_cents = ["ZC=F", "ZS=F", "KC=F", "GC=F"]
     
     precos_formatados = {}
     
-    # 1. Pega a cotação do Dólar para converter os preços para BRL
     try:
         dolar_ticker = yf.Ticker("BRL=X")
-        dolar_data = dolar_ticker.history(period="2d") # Pega 2 dias para garantir que há um valor
+        dolar_data = dolar_ticker.history(period="2d")
         if dolar_data.empty:
             logging.error("yfinance não retornou dados para BRL=X.")
-            return "⚠️ Erro ao buscar cotação do dólar para conversão."
+            return "⚠️ Erro ao buscar cotação do dólar."
         dolar_brl = dolar_data['Close'].iloc[-1]
     except Exception as e:
         logging.error(f"Erro ao buscar cotação do dólar no yfinance: {e}")
-        return "⚠️ Erro ao buscar cotação do dólar para conversão."
+        return "⚠️ Erro ao buscar cotação do dólar."
 
-    # 2. Busca o preço de cada commodity
     for nome, ticker_symbol in tickers.items():
         try:
             ticker = yf.Ticker(ticker_symbol)
             info = ticker.info
-            preco_usd = info.get('regularMarketPrice')
+            preco_base = info.get('regularMarketPrice')
 
-            if preco_usd:
+            if not preco_base:
+                history = ticker.history(period="2d")
+                if not history.empty:
+                    preco_base = history['Close'].iloc[-1]
+            
+            if preco_base:
+                # CORREÇÃO: Divide por 100 se o preço for em centavos
+                preco_usd = preco_base / 100.0 if ticker_symbol in tickers_in_cents else preco_base
                 preco_brl = preco_usd * dolar_brl
                 precos_formatados[nome] = f"R$ {preco_brl:,.2f}"
             else:
-                # Se 'regularMarketPrice' falhar, tenta pegar o último fechamento
-                history = ticker.history(period="2d")
-                if not history.empty:
-                    preco_usd = history['Close'].iloc[-1]
-                    preco_brl = preco_usd * dolar_brl
-                    precos_formatados[nome] = f"R$ {preco_brl:,.2f}"
-                else:
-                    precos_formatados[nome] = "Indisponível"
+                precos_formatados[nome] = "Indisponível"
         except Exception as e:
             logging.error(f"Erro ao buscar {nome} ({ticker_symbol}) no yfinance: {e}")
             precos_formatados[nome] = "Erro"
@@ -120,8 +119,7 @@ def get_fact_check_feed() -> dict | str:
         except Exception as e:
             logging.exception(f"Erro ao processar feed RSS: {e}")
     return "❌ Erro ao buscar notícias de checagem."
-
-# ... (outras funções de busca permanecem as mesmas) ...
+    
 def get_saudacao() -> str:
     hora_atual = datetime.now(FUSO_BRASIL).hour
     if 5 <= hora_atual < 12: return "Bom dia!"
@@ -132,7 +130,7 @@ def fase_da_lua(data_str_ephem_format: str) -> str:
         date_observer = ephem.Date(data_str_ephem_format)
         moon = ephem.Moon(date_observer)
         illumination = moon.phase * 100
-        is_waxing = moon.phase < ephem.next_full_moon(date_observer)
+        is_waxing = moon.phase < ephem.next_full_moon(date_observer).datetime().timestamp()
         if illumination <= 3: return "Lua Nova 🌑"
         if illumination >= 97: return "Lua Cheia 🌕"
         if 48 <= illumination <= 52:
@@ -239,7 +237,7 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
         f"🪙 Cotação do Bitcoin: R$ {jornal_data['cotacoes']['btc_plain_str']}", ""
     ]
     
-    plain_list.append("🌾 Cotação de Commodities")
+    plain_list.append("🌾 Cotação de Commodities (Mercado Futuro)")
     commodities_data = jornal_data.get('commodities')
     if isinstance(commodities_data, dict):
         for name, price in commodities_data.items():
