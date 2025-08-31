@@ -207,6 +207,61 @@ def get_exchange_rate_api(base_currency: str, target_currency: str, api_key: str
         return "Falha Conexão API Cotação"
     return "Indisponível (API ñ/config.)"
 
+def get_cepea_prices_scraping() -> dict | str:
+    """
+    Busca os preços de commodities (Milho, Soja) fazendo web scraping
+    do site do CEPEA/USP.
+    Retorna um dicionário com os dados ou uma string de erro.
+    """
+    logging.info("Iniciando busca de preços de commodities via Web Scraping do CEPEA.")
+    
+    # Dicionário com o nome da commodity e a URL do indicador no site do CEPEA
+    cepea_urls = {
+        "Milho": "https://www.cepea.esalq.usp.br/br/indicador/milho.aspx",
+        "Soja": "https://www.cepea.esalq.usp.br/br/indicador/soja.aspx",
+        "Boi Gordo": "https://www.cepea.esalq.usp.br/br/indicador/boi-gordo.aspx"
+    }
+    
+    commodity_prices = {}
+    
+    for commodity_name, url in cepea_urls.items():
+        try:
+            logging.info(f"Buscando dados para {commodity_name} em {url}")
+            response = safe_request_get(url)
+            if not response:
+                commodity_prices[commodity_name] = {"valor": "Falha na conexão", "data": ""}
+                continue
+
+            soup = BeautifulSoup(response.content, "html.parser")
+            
+            # Os valores no site do CEPEA ficam em divs com classes específicas
+            # Ex: <div class="imagen_indicador_valor"> 60,35 </div>
+            # Ex: <div class="imagen_indicador_data"> Sexta-feira, 29 de agosto de 2025 </div>
+            valor_div = soup.find('div', class_='imagen_indicador_valor')
+            data_div = soup.find('div', class_='imagen_indicador_data')
+            
+            if valor_div and data_div:
+                valor = valor_div.text.strip()
+                # Pega só a data, ignorando o dia da semana. Ex: "Sexta-feira, 29 de agosto de 2025" -> "29 de agosto de 2025"
+                data_str = data_div.text.strip().split(',')[-1].strip()
+                
+                # O valor já vem em R$ para a saca/arroba
+                commodity_prices[commodity_name] = {"valor": f"R$ {valor}", "data": data_str}
+                logging.info(f"Sucesso ao extrair dados para {commodity_name}: {valor} em {data_str}")
+            else:
+                commodity_prices[commodity_name] = {"valor": "Não encontrado", "data": "N/A"}
+                logging.warning(f"Não foi possível encontrar as divs de valor/data para {commodity_name}.")
+
+        except Exception as e:
+            logging.exception(f"Erro ao fazer scraping para {commodity_name}: {e}")
+            commodity_prices[commodity_name] = {"valor": "Erro no processo", "data": ""}
+            
+    if not commodity_prices:
+        return "⚠️ Falha geral ao buscar dados de commodities do CEPEA."
+        
+    return commodity_prices
+
+
 def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[list[dict], str | None]:
     if not NEWS_API_KEY: return [], "⚠️ Chave API NewsAPI não configurada."
     parametros = {'q': query_term, 'language': 'pt', 'sortBy': 'publishedAt', 'pageSize': max_articles + 10, 'apiKey': NEWS_API_KEY}
@@ -237,16 +292,10 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
 # --- Funções do Telegram ---
 
 def escape_markdown_v2(text: str | None) -> str:
-    """Escapa caracteres especiais para o formato MarkdownV2 do Telegram.
-       Necessário se parse_mode='MarkdownV2' for usado no send_telegram_message.
-       Se parse_mode for omitido (plain text), este escape é menos crítico mas
-       pode ajudar a evitar que o Telegram interprete algo acidentalmente.
-    """
+    """Escapa caracteres especiais para o formato MarkdownV2 do Telegram."""
     if text is None: text = ""
     if not isinstance(text, str): text = str(text)
-    # Caracteres que o Telegram MarkdownV2 reserva: _ * [ ] ( ) ~ ` > # + - = | { } . !
     escape_chars = r'_*[]()~`>#+-=|{}.!'
-    # No MarkdownV2, para escapar um caractere, você o precede com \
     return "".join(f'\\{char}' if char in escape_chars else char for char in text)
 
 def formatar_para_telegram_plain(jornal_data: dict) -> str:
@@ -257,27 +306,25 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
     fase_lua = jornal_data["fase_lua"]
     
     # Cabeçalho
-    # Para evitar SyntaxError com f-string aninhada, construímos em passos
     titulo_news_texto = f'Juninho News - {data_display}'
-    plain_list.append(f"📰 {titulo_news_texto}") # Sem formatação Markdown explícita
+    plain_list.append(f"📰 {titulo_news_texto}")
 
     local_texto = 'De Pires do Rio-GO'
     plain_list.append(f"📌 {local_texto}")
 
-    fase_lua_texto = f'Fase da Lua: {fase_lua}' # A função fase_da_lua já inclui o emoji
-    plain_list.append(f"🌒 {fase_lua_texto}") # Mantendo o emoji antes do texto da fase
+    fase_lua_texto = f'Fase da Lua: {fase_lua}'
+    plain_list.append(f"🌒 {fase_lua_texto}")
     plain_list.append("")
 
     # Frase e Versículo
     frase_titulo_texto = 'Frase de Hoje'
     plain_list.append(f"💭 {frase_titulo_texto}")
-    plain_list.append(jornal_data['frase_dia']) # Conteúdo direto
+    plain_list.append(jornal_data['frase_dia'])
     plain_list.append("")
 
     versiculo_titulo_texto = 'Versículo do Dia'
     plain_list.append(f"📖 {versiculo_titulo_texto}")
     plain_list.append(jornal_data['versiculo_dia'])
-    # plain_list.append("Fonte: Bible Gateway (ARC)") # Opcional, como no original
     plain_list.append("") 
 
     # Agradecimento
@@ -290,14 +337,13 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
     # Datas Comemorativas
     datas_titulo_texto = f'HOJE É DIA... {data_display}:'
     plain_list.append(f"🗓 {datas_titulo_texto}")
-    plain_list.append(jornal_data['datas_comemorativas']) # Já formatado com "-" pela obter_datas_comemorativas
+    plain_list.append(jornal_data['datas_comemorativas'])
     plain_list.append("")
     
     # Cotações
-    plain_list.append(f" 💵 Cotação do Dólar") # Espaço no início como no original
-    # CORRIGIDO: Evitar f-string aninhada para escape, e usar valor direto
+    plain_list.append(f" 💵 Cotação do Dólar")
     dolar_valor_str = f"R$ {jornal_data['cotacoes']['dolar']}"
-    plain_list.append(f" {dolar_valor_str}") # Espaço no início
+    plain_list.append(f" {dolar_valor_str}")
     plain_list.append("")
 
     plain_list.append(f"💶 Cotação do Euro")
@@ -306,8 +352,7 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
     plain_list.append("")
 
     plain_list.append(f"🪙 Cotação do Ethereum")
-    # 'eth_plain_str' já é "VALOR" ou "Erro...", R$ adicionado aqui
-    eth_valor_str = f"R${jornal_data['cotacoes']['eth_plain_str']}" # R$ colado
+    eth_valor_str = f"R${jornal_data['cotacoes']['eth_plain_str']}"
     plain_list.append(f" {eth_valor_str}")
     plain_list.append("")
 
@@ -315,8 +360,24 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
     btc_valor_str = f"R$ {jornal_data['cotacoes']['btc_plain_str']}"
     plain_list.append(f" {btc_valor_str}")
     plain_list.append("")
-    # plain_list.append("Cripto: Dados por CoinGecko")
 
+    # --- INÍCIO DA SEÇÃO DE COMMODITIES (VERSÃO CEPEA) ---
+    plain_list.append(f"🌾 Cotação de Commodities (Mercado Físico BR)")
+    commodities_data = jornal_data.get('commodities')
+    if isinstance(commodities_data, dict):
+        for commodity_name, data in commodities_data.items():
+            valor = data.get('valor', 'N/A')
+            data_cotacao = data.get('data', '')
+            # Adiciona a unidade de medida para clareza
+            unidade = "saca 60kg" if commodity_name in ["Milho", "Soja"] else "@" if commodity_name == "Boi Gordo" else ""
+            plain_list.append(f" - {commodity_name} ({unidade}): {valor} ({data_cotacao})")
+        plain_list.append("Fonte: CEPEA/USP")
+    else:
+        # Se for uma string (mensagem de erro), exibe a mensagem
+        plain_list.append(str(commodities_data))
+    plain_list.append("")
+    # --- FIM DA NOVA SEÇÃO DE COMMODITIES ---
+    
     # Notícias
     for secao_titulo_com_emoji, artigos_ou_msg in jornal_data['noticias'].items():
         plain_list.append(f"\n{secao_titulo_com_emoji}  ") 
@@ -335,16 +396,13 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
             plain_list.append(artigos_ou_msg)
         else:
             for artigo in artigos_ou_msg:
-                # Título como Hiperlink se parse_mode: MarkdownV2 for usado,
-                # ou apenas texto se parse_mode for omitido.
-                # Para o estilo "original print", o título não era hiperlink.
-                plain_list.append(f"📰 {artigo['title']}") # Apenas o título
+                plain_list.append(f"📰 {artigo['title']}")
                 plain_list.append(f"🏷 Fonte: {artigo['source']}")
                 if artigo['description']:
                     desc_limpa = artigo['description'].replace('\r\n', '\n').replace('\r', '\n')
                     plain_list.append(f"📝 {desc_limpa}")
                 if artigo['url']:
-                    plain_list.append(f"🔗 {artigo['url']}") # URL plain
+                    plain_list.append(f"🔗 {artigo['url']}")
                 plain_list.append("") 
         plain_list.append("") 
     
@@ -383,14 +441,12 @@ def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
                 messages_to_send.append(part[:max_length - 30] + "\n...[mensagem cortada]...")
             else: messages_to_send.append(part)
         if not messages_to_send and message_text: 
-             messages_to_send.append(message_text[:max_length - 30] + "\n...[mensagem cortada]...")
+                messages_to_send.append(message_text[:max_length - 30] + "\n...[mensagem cortada]...")
     else: messages_to_send.append(message_text)
 
     all_sent_successfully = True
     for i, part_message in enumerate(messages_to_send):
         if not part_message.strip(): continue
-        # Removido 'parse_mode' para enviar como texto o mais simples possível.
-        # Telegram ainda deve auto-linkar URLs.
         payload = {'chat_id': chat_id, 'text': part_message, 'disable_web_page_preview': False}
         try:
             response = requests.post(send_url, data=payload, timeout=30)
@@ -432,6 +488,7 @@ def main_automated():
             'eth_plain_str': f"{eth_val:,.2f}" if eth_val is not None else "Erro/Indisponível",
             'btc_plain_str': f"{btc_val:,.2f}" if btc_val is not None else "Erro/Indisponível",
         },
+        'commodities': get_cepea_prices_scraping(),
         'noticias': {},
         'fake_news': get_boatos_org_feed()
     }
