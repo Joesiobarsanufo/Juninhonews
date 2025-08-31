@@ -23,7 +23,8 @@ PENSADOR_URL = "https://www.pensador.com/frases_de_pensadores_famosos/"
 BOATOS_ORG_FEED_URL = "https://www.boatos.org/feed"
 EXCHANGE_RATE_API_BASE_URL = "https://v6.exchangerate-api.com/v6"
 
-USER_AGENT = "JuninhoNewsBot/1.12 (Automated Script)"
+# CORRIGIDO: User-Agent de um navegador comum para evitar bloqueios
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 FUSO_BRASIL = pytz.timezone('America/Sao_Paulo')
 FILE_PATH_DATAS_COMEMORATIVAS = "datas comemorativas.xlsx"
 
@@ -49,8 +50,8 @@ def safe_request_get(url, params=None, timeout=10, max_retries=2, delay_seconds=
             return response
         except requests.exceptions.HTTPError as http_err:
             logging.error(f"HTTP error: {http_err} (URL: {url}, Status: {http_err.response.status_code})")
-            if http_err.response.status_code in [401, 403]:
-                logging.error("Erro de autorização/permissão.")
+            if http_err.response.status_code in [401, 403, 404]:
+                logging.error(f"Erro de Cliente ({http_err.response.status_code}). Acesso negado ou recurso não encontrado.")
                 break
             if http_err.response.status_code == 429:
                 logging.warning(f"Rate limit atingido. Aguardando {delay_seconds * (attempt + 2)}s.")
@@ -175,10 +176,14 @@ def get_boatos_org_feed() -> dict | str :
     response = safe_request_get(BOATOS_ORG_FEED_URL)
     if response:
         try:
+            # Usar 'lxml-xml' é mais robusto para feeds RSS, se 'lxml' estiver instalado.
+            # Se não, 'xml' é a alternativa padrão do BeautifulSoup.
             soup = BeautifulSoup(response.content, 'xml')
             items = soup.find_all("item")
+            
+            # Pega o primeiro item do feed, que é o mais recente.
             if items:
-                boato = random.choice(items)
+                boato = items[0] 
                 titulo_tag, link_tag = boato.find("title"), boato.find("link")
                 if titulo_tag and link_tag:
                     return {"title": titulo_tag.text.strip(), "link": link_tag.text.strip()}
@@ -215,7 +220,6 @@ def get_cepea_prices_scraping() -> dict | str:
     """
     logging.info("Iniciando busca de preços de commodities via Web Scraping do CEPEA.")
     
-    # Dicionário com o nome da commodity e a URL do indicador no site do CEPEA
     cepea_urls = {
         "Milho": "https://www.cepea.esalq.usp.br/br/indicador/milho.aspx",
         "Soja": "https://www.cepea.esalq.usp.br/br/indicador/soja.aspx",
@@ -234,18 +238,13 @@ def get_cepea_prices_scraping() -> dict | str:
 
             soup = BeautifulSoup(response.content, "html.parser")
             
-            # Os valores no site do CEPEA ficam em divs com classes específicas
-            # Ex: <div class="imagen_indicador_valor"> 60,35 </div>
-            # Ex: <div class="imagen_indicador_data"> Sexta-feira, 29 de agosto de 2025 </div>
             valor_div = soup.find('div', class_='imagen_indicador_valor')
             data_div = soup.find('div', class_='imagen_indicador_data')
             
             if valor_div and data_div:
                 valor = valor_div.text.strip()
-                # Pega só a data, ignorando o dia da semana. Ex: "Sexta-feira, 29 de agosto de 2025" -> "29 de agosto de 2025"
                 data_str = data_div.text.strip().split(',')[-1].strip()
                 
-                # O valor já vem em R$ para a saca/arroba
                 commodity_prices[commodity_name] = {"valor": f"R$ {valor}", "data": data_str}
                 logging.info(f"Sucesso ao extrair dados para {commodity_name}: {valor} em {data_str}")
             else:
@@ -292,14 +291,12 @@ def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[lis
 # --- Funções do Telegram ---
 
 def escape_markdown_v2(text: str | None) -> str:
-    """Escapa caracteres especiais para o formato MarkdownV2 do Telegram."""
     if text is None: text = ""
     if not isinstance(text, str): text = str(text)
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return "".join(f'\\{char}' if char in escape_chars else char for char in text)
 
 def formatar_para_telegram_plain(jornal_data: dict) -> str:
-    """Formata os dados do jornal para um estilo plain text, similar ao original do usuário."""
     plain_list = []
     
     data_display = jornal_data["data_display"]
@@ -361,22 +358,19 @@ def formatar_para_telegram_plain(jornal_data: dict) -> str:
     plain_list.append(f" {btc_valor_str}")
     plain_list.append("")
 
-    # --- INÍCIO DA SEÇÃO DE COMMODITIES (VERSÃO CEPEA) ---
+    # Seção de Commodities (CEPEA)
     plain_list.append(f"🌾 Cotação de Commodities (Mercado Físico BR)")
     commodities_data = jornal_data.get('commodities')
     if isinstance(commodities_data, dict):
         for commodity_name, data in commodities_data.items():
             valor = data.get('valor', 'N/A')
             data_cotacao = data.get('data', '')
-            # Adiciona a unidade de medida para clareza
             unidade = "saca 60kg" if commodity_name in ["Milho", "Soja"] else "@" if commodity_name == "Boi Gordo" else ""
             plain_list.append(f" - {commodity_name} ({unidade}): {valor} ({data_cotacao})")
         plain_list.append("Fonte: CEPEA/USP")
     else:
-        # Se for uma string (mensagem de erro), exibe a mensagem
         plain_list.append(str(commodities_data))
     plain_list.append("")
-    # --- FIM DA NOVA SEÇÃO DE COMMODITIES ---
     
     # Notícias
     for secao_titulo_com_emoji, artigos_ou_msg in jornal_data['noticias'].items():
