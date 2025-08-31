@@ -4,6 +4,8 @@ ephem
 requests
 beautifulsoup4
 pytz
-lxml  # <--- Adicione esta linha
+lxml 
+yfinance
+# <--- Adicione esta linha
 # Pillow (se for usar no futuro)
 # unidecode (se for usar no futuro)
