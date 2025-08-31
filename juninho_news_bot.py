@@ -4,13 +4,13 @@ import os
 import random
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import ephem
 import pandas as pd
 import pytz
 import requests
-from bs4 import BeautifulSoup # lxml precisará estar instalado para 'xml' parser
+from bs4 import BeautifulSoup
 
 # --- Configuração básica de logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s')
@@ -20,8 +20,9 @@ NEWS_API_URL = "https://newsapi.org/v2/everything"
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price"
 BIBLE_GATEWAY_VOTD_URL = "https://www.biblegateway.com/votd/get/?format=xml&version=ARC"
 PENSADOR_URL = "https://www.pensador.com/frases_de_pensadores_famosos/"
-BOATOS_ORG_FEED_URL = "https://www.boatos.org/feed"
+E_FARSAS_FEED_URL = "https://www.e-farsas.com/feed" # <-- NOVA FONTE DE FAKE NEWS
 EXCHANGE_RATE_API_BASE_URL = "https://v6.exchangerate-api.com/v6"
+COMMODITIES_API_BASE_URL = "https://api.commodities-api.com/v1" # <-- API DE COMMODITIES
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 FUSO_BRASIL = pytz.timezone('America/Sao_Paulo')
@@ -32,445 +33,336 @@ NEWS_API_KEY = os.getenv('NEWS_API_KEY')
 EXCHANGE_RATE_API_KEY = os.getenv('EXCHANGE_RATE_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+COMMODITIES_API_KEY = os.getenv('COMMODITIES_API_KEY') # <-- NOVA CHAVE CARREGADA
 
 # --- Funções Utilitárias e de Busca ---
 
-def safe_request_get(url, params=None, timeout=10, max_retries=2, delay_seconds=2):
-    print(f"[DEBUG] Executando safe_request_get para a URL: {url}")
+def safe_request_get(url, params=None, timeout=15, max_retries=2, delay_seconds=3):
     headers = {'User-Agent': USER_AGENT}
-    if not ("newsapi.org" in url and NEWS_API_KEY) and not ("api.coingecko.com" in url):
-        headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        headers['Pragma'] = 'no-cache'
-        headers['Expires'] = '0'
     for attempt in range(max_retries):
         try:
             time.sleep(random.uniform(0.5, 1.5))
             response = requests.get(url, params=params, headers=headers, timeout=timeout)
             response.raise_for_status()
-            print(f"[DEBUG] Sucesso na requisição para {url} (Status: {response.status_code})")
             return response
         except requests.exceptions.RequestException as req_err:
             logging.error(f"Erro na requisição para {url}: {req_err}")
-            print(f"[DEBUG] FALHA na requisição para {url}. Erro: {req_err}")
         if attempt < max_retries - 1:
             logging.info(f"Tentando novamente {url} em {delay_seconds}s... (Tentativa {attempt + 1}/{max_retries})")
+            time.sleep(delay_seconds)
         else:
             logging.error(f"Máximo de tentativas ({max_retries}) atingido para {url}.")
     return None
 
-def get_cepea_prices_scraping() -> dict | str:
-    logging.info("Iniciando busca de preços de commodities via Web Scraping do CEPEA.")
-    print("\n--- [DEBUG] INICIANDO FUNÇÃO get_cepea_prices_scraping ---")
-    cepea_urls = {
-        "Milho": "https://www.cepea.esalq.usp.br/br/indicador/milho.aspx",
-        "Soja": "https://www.cepea.esalq.usp.br/br/indicador/soja.aspx",
-        "Boi Gordo": "https://www.cepea.esalq.usp.br/br/indicador/boi-gordo.aspx"
-    }
-    commodity_prices = {}
-    for commodity_name, url in cepea_urls.items():
-        print(f"[DEBUG] Buscando commodity: {commodity_name}")
-        response = safe_request_get(url)
-        print(f"[DEBUG] Resultado da busca para {commodity_name}: {'Recebeu resposta' if response else 'NÃO recebeu resposta'}")
-        if not response:
-            commodity_prices[commodity_name] = {"valor": "Falha na conexão", "data": ""}
-            continue
-        try:
-            soup = BeautifulSoup(response.content, "html.parser")
-            valor_div = soup.find('div', class_='imagen_indicador_valor')
-            data_div = soup.find('div', class_='imagen_indicador_data')
-            if valor_div and data_div:
-                valor = valor_div.text.strip()
-                data_str = data_div.text.strip().split(',')[-1].strip()
-                commodity_prices[commodity_name] = {"valor": f"R$ {valor}", "data": data_str}
-                print(f"[DEBUG] Sucesso ao extrair dados para {commodity_name}")
-            else:
-                commodity_prices[commodity_name] = {"valor": "Não encontrado", "data": "N/A"}
-                print(f"[DEBUG] FALHA ao extrair dados para {commodity_name}: divs não encontradas.")
-        except Exception as e:
-            logging.exception(f"Erro ao fazer scraping para {commodity_name}: {e}")
-            commodity_prices[commodity_name] = {"valor": "Erro no processo", "data": ""}
-    print("--- [DEBUG] FINALIZANDO FUNÇÃO get_cepea_prices_scraping ---\n")
-    return commodity_prices
-
-# ... (O restante das suas funções como get_saudacao, fase_da_lua, etc., permanecem iguais)
-def get_saudacao() -> str:
-    hora_atual = datetime.now(FUSO_BRASIL).hour
-    if 5 <= hora_atual < 12: return "Bom dia!"
-    elif 12 <= hora_atual < 18: return "Boa tarde!"
-    else: return "Boa noite!"
-
-def fase_da_lua(data_str_ephem_format: str) -> str:
+def get_commodity_prices(api_key: str | None) -> dict[str, str] | str:
+    """Busca preços de commodities da API internacional, converte de USD para BRL e retorna um dict formatado."""
+    if not api_key:
+        return "⚠️ Cotação de commodities indisponível (API não configurada)."
+    
+    dolar_str = get_exchange_rate_api("USD", "BRL", EXCHANGE_RATE_API_KEY)
     try:
-        date_observer = ephem.Date(data_str_ephem_format)
-        moon = ephem.Moon(date_observer)
-        illumination = moon.phase
-        prev_date = ephem.Date(date_observer - 1)
-        moon_prev = ephem.Moon(prev_date)
-        is_waxing = illumination > moon_prev.phase
-        if abs(illumination - moon_prev.phase) < 0.5 :
-            pnm = ephem.previous_new_moon(date_observer)
-            pfm = ephem.previous_full_moon(date_observer)
-            if date_observer == pnm or date_observer == ephem.next_new_moon(date_observer): illumination = 0
-            if date_observer == pfm or date_observer == ephem.next_full_moon(date_observer): illumination = 50
-            is_waxing = True if pnm > pfm and date_observer > pnm else (False if pfm > pnm and date_observer > pfm else is_waxing)
+        dolar_brl_rate = float(dolar_str.replace('.', '').replace(',', '.'))
+    except (ValueError, AttributeError):
+        logging.error(f"Não foi possível converter a cotação do dólar '{dolar_str}' para conversão.")
+        return "⚠️ Erro ao obter taxa do dólar para conversão."
 
-        if illumination < 3: return "Lua Nova 🌑"
-        if illumination > 97: return "Lua Nova (final) 🌑"
-        if illumination >= 48 and illumination <= 52: return "Lua Cheia 🌕"
-        if illumination >= 23 and illumination <= 27:
-            return "Quarto Crescente 🌓" if is_waxing else "Quarto Minguante 🌗"
-        if is_waxing:
-            if illumination < 23: return "Lua Crescente Côncava 🌒"
-            if illumination < 48: return "Lua Crescente Gibosa 🌔"
-        else:
-            if illumination > 77: return "Lua Minguante Côncava 🌘"
-            if illumination > 52: return "Lua Minguante Gibosa 🌖"
-        logging.warning(f"Fase da lua (ilum: {illumination}%, crescendo: {is_waxing}) não encaixou, usando fallback.")
-        return "Fase Crescente (aprox.) 🌔" if is_waxing else "Fase Minguante (aprox.) 🌖"
-    except Exception as e:
-        logging.exception(f"Erro ao calcular fase da lua para '{data_str_ephem_format}': {e}")
-        return "Fase da lua indisponível"
-
-def obter_datas_comemorativas(file_path: str, sheet_name='tabela') -> str:
-    logging.info(f"Tentando ler arquivo de datas: {os.path.abspath(file_path)}")
-    if not os.path.exists(file_path):
-        logging.warning(f"Arquivo de datas não encontrado em: {file_path}")
-        return "⚠️ Arquivo de datas comemorativas não encontrado."
-    try:
-        df = pd.read_excel(file_path, sheet_name=sheet_name)
-        if df.empty or len(df.columns) < 2:
-            return "⚠️ Arquivo de datas vazio ou mal formatado."
-        df.columns = ['DataRaw', 'DescricaoRaw'] + list(df.columns[2:])
-        df['Data'] = pd.to_datetime(df['DataRaw'], errors='coerce')
-        df['Descricao'] = df['DescricaoRaw'].astype(str).str.strip()
-        data_atual_obj = datetime.now(FUSO_BRASIL).date()
-        datas_hoje = df[df['Data'].dt.date == data_atual_obj]
-        if not datas_hoje.empty:
-            return "\n".join(f"- {row['Descricao']}" for _, row in datas_hoje.iterrows())
-        return f"Nenhuma data comemorativa listada para hoje ({data_atual_obj.strftime('%d/%m')})."
-    except Exception as e:
-        logging.exception(f"Erro ao ler/processar datas: {file_path}: {e}")
-        return "⚠️ Erro ao carregar datas comemorativas."
-
-def get_crypto_price(coin_id: str, coin_name: str) -> float | None:
-    url = f"{COINGECKO_API_URL}?ids={coin_id}&vs_currencies=brl"
+    commodities_map = {"SOYBEAN": "Soja", "CORN": "Milho", "WHEAT": "Trigo", "COFFEE": "Café", "BRENTOIL": "Petróleo (Brent)"}
+    symbols_list = ",".join(commodities_map.keys())
+    
+    url = f"{COMMODITIES_API_BASE_URL}/latest?access_key={api_key}&base=USD&symbols={symbols_list}"
     response = safe_request_get(url)
-    if response:
-        try:
-            data = response.json()
-            price = data.get(coin_id, {}).get("brl")
-            if price is not None: return float(price)
-        except (ValueError, TypeError, AttributeError, requests.exceptions.JSONDecodeError) as e:
-            logging.exception(f"Erro ao processar dados de {coin_name} da CoinGecko: {e}")
-    return None
 
-def get_biblical_verse() -> str:
-    response = safe_request_get(BIBLE_GATEWAY_VOTD_URL)
-    if response:
-        try:
-            response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, 'xml')
-            verse_text_tag, reference_tag = soup.find("text"), soup.find("reference")
-            if verse_text_tag and reference_tag:
-                return f"{html.unescape(verse_text_tag.text.strip())} ({html.unescape(reference_tag.text.strip())})"
-        except Exception as e: logging.exception(f"Erro ao processar XML da Bible Gateway: {e}")
-    return "Não foi possível obter o versículo."
+    if not response: return "❌ Falha na conexão com a API de commodities."
+    try:
+        data = response.json()
+        if data.get("success"):
+            rates = data.get("data", {}).get("rates", {})
+            if not rates: return "Nenhuma cotação de commodity retornada."
+            
+            formatted_prices = {}
+            for symbol, name in commodities_map.items():
+                if symbol in rates:
+                    price_usd = 1 / rates[symbol]
+                    price_brl = price_usd * dolar_brl_rate
+                    formatted_prices[name] = f"R$ {price_brl:,.2f}"
+                else:
+                    formatted_prices[name] = "Indisponível"
+            return formatted_prices
+        else:
+            error_info = data.get('error', {}).get('info', 'Erro desconhecido.')
+            logging.error(f"Erro da API de Commodities: {error_info}")
+            return f"⚠️ Erro na API de Commodities."
+    except Exception as e:
+        logging.exception(f"Erro ao processar dados de commodities: {e}")
+        return "❌ Erro ao processar a resposta da API de commodities."
 
-def get_quote_pensador() -> str:
-    response = safe_request_get(PENSADOR_URL)
-    if response:
-        try:
-            soup = BeautifulSoup(response.text, "html.parser")
-            frases_tags = soup.select("p.frase")
-            if frases_tags:
-                frase_el = random.choice(frases_tags)
-                texto_frase = frase_el.text.strip()
-                autor = None
-                autor_el_p = frase_el.find_next_sibling("p", class_="autor")
-                if autor_el_p and autor_el_p.find('a'): autor = autor_el_p.find('a').text.strip()
-                if not autor :
-                    autor_el_span = frase_el.find_parent().find("span", class_="autor")
-                    if autor_el_span : autor = autor_el_span.text.strip()
-                return f'"{texto_frase}"{f" - {autor}" if autor else ""}'
-        except Exception as e: logging.exception(f"Erro ao processar HTML do Pensador.com: {e}")
-    return "⚠️ Nenhuma frase encontrada."
-
-def get_boatos_org_feed() -> dict | str :
-    response = safe_request_get(BOATOS_ORG_FEED_URL)
+def get_fact_check_feed() -> dict | str :
+    response = safe_request_get(E_FARSAS_FEED_URL)
     if response:
         try:
             soup = BeautifulSoup(response.content, 'xml')
             items = soup.find_all("item")
             if items:
-                boato = items[0]
-                titulo_tag, link_tag = boato.find("title"), boato.find("link")
+                latest_item = items[0] 
+                titulo_tag, link_tag = latest_item.find("title"), latest_item.find("link")
                 if titulo_tag and link_tag:
                     return {"title": titulo_tag.text.strip(), "link": link_tag.text.strip()}
-                return "⚠️ Formato inesperado no feed Boatos.org."
+                return "⚠️ Formato inesperado no feed."
         except Exception as e:
-            logging.exception(f"Erro ao processar feed RSS do Boatos.org: {e}")
-            if "Couldn't find a tree builder" in str(e):
-                return "❌ Erro: Parser XML (lxml) não encontrado."
-    return "❌ Erro ao buscar fake news do Boatos.org."
+            logging.exception(f"Erro ao processar feed RSS: {e}")
+    return "❌ Erro ao buscar notícias de checagem."
+    
+# ... (demais funções: get_saudacao, fase_da_lua, obter_datas_comemorativas, get_crypto_price, etc. permanecem aqui)
+def get_saudacao() -> str:
+    hora_atual = datetime.now(FUSO_BRASIL).hour
+    if 5 <= hora_atual < 12: return "Bom dia!"
+    elif 12 <= hora_atual < 18: return "Boa tarde!"
+    else: return "Boa noite!"
+def fase_da_lua(data_str_ephem_format: str) -> str:
+    try:
+        date_observer = ephem.Date(data_str_ephem_format)
+        moon = ephem.Moon(date_observer)
+        illumination = moon.phase * 100
+        if 0 <= illumination < 3: return "Lua Nova 🌑"
+        if 3 <= illumination < 48:
+            return "Lua Crescente Côncava 🌒" if illumination < 25 else "Lua Crescente Gibosa 🌔"
+        if 48 <= illumination < 52: return "Lua Cheia 🌕"
+        if 52 <= illumination < 97:
+            return "Lua Minguante Gibosa 🌖" if illumination > 75 else "Lua Minguante Côncava 🌘"
+        if illumination >= 97: return "Lua Nova (final) 🌑"
 
+        # Fallback for crescent/waning quarters based on trend
+        prev_date = ephem.Date(date_observer - 1)
+        is_waxing = moon.phase > ephem.Moon(prev_date).phase
+        if 23 <= illumination <= 27:
+            return "Quarto Crescente 🌓" if is_waxing else "Quarto Minguante 🌗"
+
+        return "Fase Crescente (aprox.) 🌔" if is_waxing else "Fase Minguante (aprox.) 🌖"
+    except Exception: return "Fase da lua indisponível"
+def obter_datas_comemorativas(file_path: str, sheet_name='tabela') -> str:
+    if not os.path.exists(file_path): return "⚠️ Arquivo de datas comemorativas não encontrado."
+    try:
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+        df.columns = ['DataRaw', 'DescricaoRaw'] + list(df.columns[2:])
+        df['Data'] = pd.to_datetime(df['DataRaw'], errors='coerce').dt.date
+        df = df.dropna(subset=['Data'])
+        today = datetime.now(FUSO_BRASIL).date()
+        datas_hoje = df[df['Data'] == today]
+        if not datas_hoje.empty:
+            return "\n".join(f"- {row['DescricaoRaw']}" for _, row in datas_hoje.iterrows())
+        return f"Nenhuma data comemorativa listada para hoje ({today.strftime('%d/%m')})."
+    except Exception as e:
+        logging.exception(f"Erro ao ler/processar datas: {e}")
+        return "⚠️ Erro ao carregar datas comemorativas."
+def get_crypto_price(coin_id: str, coin_name: str) -> float | None:
+    url = f"{COINGECKO_API_URL}?ids={coin_id}&vs_currencies=brl"
+    response = safe_request_get(url)
+    if response:
+        try: return float(response.json().get(coin_id, {}).get("brl"))
+        except (ValueError, TypeError, AttributeError): pass
+    return None
+def get_biblical_verse() -> str:
+    response = safe_request_get(BIBLE_GATEWAY_VOTD_URL)
+    if response:
+        try:
+            soup = BeautifulSoup(response.text, 'xml')
+            text = soup.find("text").text.strip()
+            ref = soup.find("reference").text.strip()
+            return f"{html.unescape(text)} ({html.unescape(ref)})"
+        except Exception: pass
+    return "Não foi possível obter o versículo."
+def get_quote_pensador() -> str:
+    response = safe_request_get(PENSADOR_URL)
+    if response:
+        try:
+            soup = BeautifulSoup(response.text, "html.parser")
+            frase_el = random.choice(soup.select("p.frase"))
+            texto_frase = frase_el.text.strip()
+            autor_el = frase_el.find_next_sibling("p", class_="autor")
+            autor = autor_el.text.strip() if autor_el else "Desconhecido"
+            return f'"{texto_frase}" - {autor}'
+        except Exception: pass
+    return "⚠️ Nenhuma frase encontrada."
 def get_exchange_rate_api(base_currency: str, target_currency: str, api_key: str | None) -> str:
-    if api_key:
-        url = f"{EXCHANGE_RATE_API_BASE_URL}/{api_key}/latest/{base_currency}"
-        response = safe_request_get(url)
-        if response:
-            try:
-                data = response.json()
-                if data.get("result") == "success":
-                    rate = data.get("conversion_rates", {}).get(target_currency)
-                    if rate: return f"{rate:,.2f}"
-                    return f"Erro API ({target_currency}?)"
-                return "Erro API Cotação"
-            except (requests.exceptions.JSONDecodeError, Exception) as e:
-                logging.exception(f"Erro com ExchangeRate-API: {e}")
-                return "Erro API (Proc.)"
-        return "Falha Conexão API Cotação"
-    return "Indisponível (API ñ/config.)"
-
+    if not api_key: return "Indisponível"
+    url = f"{EXCHANGE_RATE_API_BASE_URL}/{api_key}/latest/{base_currency}"
+    response = safe_request_get(url)
+    if response:
+        try:
+            data = response.json()
+            if data.get("result") == "success":
+                rate = data.get("conversion_rates", {}).get(target_currency)
+                if rate: return f"{rate:,.2f}"
+        except Exception: pass
+    return "Erro"
 def buscar_noticias_newsapi(query_term: str, max_articles: int = 5) -> tuple[list[dict], str | None]:
     if not NEWS_API_KEY: return [], "⚠️ Chave API NewsAPI não configurada."
-    parametros = {'q': query_term, 'language': 'pt', 'sortBy': 'publishedAt', 'pageSize': max_articles + 10, 'apiKey': NEWS_API_KEY}
-    response = safe_request_get(NEWS_API_URL, params=parametros)
-    if not response: return [], f"❌ Falha NewsAPI para '{query_term}'."
-    try: dados = response.json()
-    except requests.exceptions.JSONDecodeError:
-        logging.error(f"Erro JSON NewsAPI '{query_term}'. Conteúdo: {response.text[:200]}")
-        return [], "❌ Erro NewsAPI (JSON)."
-    articles_data = []
-    if dados.get('status') == 'ok' and dados.get('totalResults', 0) > 0:
-        titulos_exibidos = set()
-        for art_api in dados.get('articles', []):
-            titulo = art_api.get('title')
-            if not titulo or "[Removed]" in titulo or titulo in titulos_exibidos: continue
-            titulos_exibidos.add(titulo)
-            desc = art_api.get('description', "")
-            if len(desc) > 150: desc = desc[:147].strip() + "..."
-            articles_data.append({"title": titulo, "source": art_api.get('source', {}).get('name', 'N/A'), "description": desc, "url": art_api.get('url')})
-            if len(articles_data) >= max_articles: break
-        if not articles_data: return [], f"Nenhuma notícia relevante para '{query_term}' (pós-filtros)."
-        return articles_data, None
-    elif dados.get('status') == 'error':
-        msg = f"⚠️ Erro NewsAPI ({dados.get('code', 'err')}): {dados.get('message', '')}"
-        return [], msg
-    return [], f"Nenhuma notícia sobre '{query_term}'."
-
-def escape_markdown_v2(text: str | None) -> str:
-    if text is None: text = ""
-    if not isinstance(text, str): text = str(text)
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return "".join(f'\\{char}' if char in escape_chars else char for char in text)
+    params = {'q': query_term, 'language': 'pt', 'sortBy': 'publishedAt', 'pageSize': max_articles + 10, 'apiKey': NEWS_API_KEY}
+    response = safe_request_get(NEWS_API_URL, params=params)
+    if not response: return [], f"❌ Falha na conexão com NewsAPI."
+    try:
+        data = response.json()
+        if data.get('status') == 'ok' and data.get('totalResults', 0) > 0:
+            articles, titles = [], set()
+            for art in data.get('articles', []):
+                if art.get('title') not in titles and "[Removed]" not in art.get('title', ''):
+                    titles.add(art['title'])
+                    articles.append({
+                        "title": art['title'],
+                        "source": art.get('source', {}).get('name', 'N/A'),
+                        "description": (art.get('description') or '')[:150] + '...',
+                        "url": art.get('url')
+                    })
+                if len(articles) >= max_articles: break
+            return articles, None
+    except Exception: return [], "❌ Erro ao processar notícias da NewsAPI."
+    return [], f"Nenhuma notícia encontrada para '{query_term}'."
 
 def formatar_para_telegram_plain(jornal_data: dict) -> str:
-    plain_list = []
-    data_display = jornal_data["data_display"]
-    fase_lua = jornal_data["fase_lua"]
-    titulo_news_texto = f'Juninho News - {data_display}'
-    plain_list.append(f"📰 {titulo_news_texto}")
-    local_texto = 'De Pires do Rio-GO'
-    plain_list.append(f"📌 {local_texto}")
-    fase_lua_texto = f'Fase da Lua: {fase_lua}'
-    plain_list.append(f"🌒 {fase_lua_texto}")
-    plain_list.append("")
-    frase_titulo_texto = 'Frase de Hoje'
-    plain_list.append(f"💭 {frase_titulo_texto}")
-    plain_list.append(jornal_data['frase_dia'])
-    plain_list.append("")
-    versiculo_titulo_texto = 'Versículo do Dia'
-    plain_list.append(f"📖 {versiculo_titulo_texto}")
-    plain_list.append(jornal_data['versiculo_dia'])
-    plain_list.append("")
-    plain_list.append("🙏 Agradecemos por acompanhar nosso jornal")
-    plain_list.append("!Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙")
-    plain_list.append("📌 Chave Pix: 64992115946")
-    plain_list.append("Seu apoio nos ajuda a continuar trazendo informações com qualidade e dedicação. Obrigado! 😊")
-    plain_list.append("")
-    datas_titulo_texto = f'HOJE É DIA... {data_display}:'
-    plain_list.append(f"🗓 {datas_titulo_texto}")
-    plain_list.append(jornal_data['datas_comemorativas'])
-    plain_list.append("")
-    plain_list.append(f" 💵 Cotação do Dólar")
-    dolar_valor_str = f"R$ {jornal_data['cotacoes']['dolar']}"
-    plain_list.append(f" {dolar_valor_str}")
-    plain_list.append("")
-    plain_list.append(f"💶 Cotação do Euro")
-    euro_valor_str = f"R$ {jornal_data['cotacoes']['euro']}"
-    plain_list.append(f" {euro_valor_str}")
-    plain_list.append("")
-    plain_list.append(f"🪙 Cotação do Ethereum")
-    eth_valor_str = f"R${jornal_data['cotacoes']['eth_plain_str']}"
-    plain_list.append(f" {eth_valor_str}")
-    plain_list.append("")
-    plain_list.append(f"🪙 Cotação do Bitcoin")
-    btc_valor_str = f"R$ {jornal_data['cotacoes']['btc_plain_str']}"
-    plain_list.append(f" {btc_valor_str}")
-    plain_list.append("")
-    plain_list.append(f"🌾 Cotação de Commodities (Mercado Físico BR)")
+    plain_list = [
+        f"📰 Juninho News - {jornal_data['data_display']}",
+        f"📌 De Pires do Rio-GO",
+        f"🌒 Fase da Lua: {jornal_data['fase_lua']}",
+        "",
+        "💭 Frase de Hoje",
+        jornal_data['frase_dia'],
+        "",
+        "📖 Versículo do Dia",
+        jornal_data['versiculo_dia'],
+        "",
+        "🙏 Agradecemos por acompanhar nosso jornal",
+        "!Se gostou do conteúdo e quer apoiar nosso trabalho, qualquer contribuição via Pix é muito bem-vinda! 💙",
+        "📌 Chave Pix: 64992115946",
+        "Seu apoio nos ajuda a continuar trazendo informações com qualidade e dedicação. Obrigado! 😊",
+        "",
+        f"🗓 HOJE É DIA... {jornal_data['data_display']}:",
+        jornal_data['datas_comemorativas'],
+        "",
+        f" 💵 Cotação do Dólar: R$ {jornal_data['cotacoes']['dolar']}",
+        f" 💶 Cotação do Euro: R$ {jornal_data['cotacoes']['euro']}",
+        f" 🪙 Cotação do Ethereum: R${jornal_data['cotacoes']['eth_plain_str']}",
+        f" 🪙 Cotação do Bitcoin: R$ {jornal_data['cotacoes']['btc_plain_str']}",
+        ""
+    ]
+    
+    # Seção de Commodities (API Internacional)
+    plain_list.append(f"🌾 Cotação de Commodities (ref. Dólar)")
     commodities_data = jornal_data.get('commodities')
     if isinstance(commodities_data, dict):
-        for commodity_name, data in commodities_data.items():
-            valor = data.get('valor', 'N/A')
-            data_cotacao = data.get('data', '')
-            unidade = "saca 60kg" if commodity_name in ["Milho", "Soja"] else "@" if commodity_name == "Boi Gordo" else ""
-            plain_list.append(f" - {commodity_name} ({unidade}): {valor} ({data_cotacao})")
-        plain_list.append("Fonte: CEPEA/USP")
+        for name, price in commodities_data.items():
+            plain_list.append(f" - {name}: {price}")
+        plain_list.append("Fonte: commodities-api.com")
     else:
         plain_list.append(str(commodities_data))
     plain_list.append("")
-    for secao_titulo_com_emoji, artigos_ou_msg in jornal_data['noticias'].items():
-        plain_list.append(f"\n{secao_titulo_com_emoji}  ")
-        nome_secao_limpo = secao_titulo_com_emoji
-        for emoji_char in "🇧🇷🟢🌍🌐⚽💰🍀🌟✈️🏆💻": nome_secao_limpo = nome_secao_limpo.replace(emoji_char, "")
-        nome_secao_limpo = nome_secao_limpo.replace("(", "").replace(")", "").replace("&", "e").replace("Estado", "").strip()
-        sub_titulo_texto = ""
-        if "Geopolitica" in nome_secao_limpo: sub_titulo_texto = f"Últimas notícias da Geopolítica mundial:"
-        elif "INTERNACIONAL" in secao_titulo_com_emoji: sub_titulo_texto = "Últimas notícias internacionais e do mundo:"
-        else: sub_titulo_texto = f"Últimas notícias de {nome_secao_limpo}:"
-        plain_list.append(f"📢 {sub_titulo_texto}\n")
-        if isinstance(artigos_ou_msg, str):
-            plain_list.append(artigos_ou_msg)
+    
+    # Notícias
+    for secao, artigos in jornal_data['noticias'].items():
+        plain_list.extend([f"\n{secao}  ", f"📢 Últimas notícias de {secao.split(' ', 1)[-1].strip()}:\n"])
+        if isinstance(artigos, str):
+            plain_list.append(artigos)
         else:
-            for artigo in artigos_ou_msg:
-                plain_list.append(f"📰 {artigo['title']}")
-                plain_list.append(f"🏷 Fonte: {artigo['source']}")
-                if artigo['description']:
-                    desc_limpa = artigo['description'].replace('\r\n', '\n').replace('\r', '\n')
-                    plain_list.append(f"📝 {desc_limpa}")
-                if artigo['url']:
-                    plain_list.append(f"🔗 {artigo['url']}")
+            for art in artigos:
+                plain_list.append(f"📰 {art['title']}")
+                plain_list.append(f"🏷 Fonte: {art['source']}")
+                if art['description']: plain_list.append(f"📝 {art['description']}")
+                if art['url']: plain_list.append(f"🔗 {art['url']}")
                 plain_list.append("")
         plain_list.append("")
-    plain_list.append(f"🔎 #FAKENEWS ")
-    boato_data = jornal_data['fake_news']
-    if isinstance(boato_data, dict):
-        plain_list.append(f"🛑 Fake News desmentida:")
-        plain_list.append(f"📢 {boato_data['title']}")
-        plain_list.append(f"🔗 {boato_data['link']}")
-    else:
-        plain_list.append(boato_data)
+
+    # Checagem de Fatos
+    plain_list.append("🔎 CHECAGEM DE FATOS") 
+    fact_check_data = jornal_data['fact_check']
+    if isinstance(fact_check_data, dict):
+        plain_list.extend([
+            f"🛑 {fact_check_data['title']}",
+            f"🔗 {fact_check_data['link']}",
+            "Fonte: E-Farsas.com"
+        ])
+    else: 
+        plain_list.append(str(fact_check_data))
     plain_list.append("")
+    
     return "\n".join(plain_list)
 
 def send_telegram_message(bot_token: str, chat_id: str, message_text: str):
-    if not bot_token or not chat_id:
-        logging.error("Token do Bot ou Chat ID do Telegram não fornecidos.")
-        return False
+    # ... (função de envio para o Telegram permanece a mesma)
+    if not bot_token or not chat_id: return False
     send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    max_length, messages_to_send = 4096, []
-    if len(message_text) > max_length:
-        logging.warning(f"Mensagem ({len(message_text)} caracteres) excede limite. Será dividida.")
-        temp_parts = []
-        current_line_buffer = ""
-        for line in message_text.splitlines(keepends=True):
-            if len(current_line_buffer) + len(line) <= max_length:
-                current_line_buffer += line
-            else:
-                if current_line_buffer:
-                    temp_parts.append(current_line_buffer)
-                current_line_buffer = line
-        if current_line_buffer:
-            temp_parts.append(current_line_buffer)
-        for part in temp_parts:
-            if len(part) > max_length:
-                messages_to_send.append(part[:max_length - 30] + "\n...[mensagem cortada]...")
-            else:
-                messages_to_send.append(part)
+    max_length = 4096
+    if len(message_text) <= max_length:
+        messages_to_send = [message_text]
     else:
-        messages_to_send.append(message_text)
+        messages_to_send = []
+        temp_message = ""
+        for line in message_text.splitlines(keepends=True):
+            if len(temp_message) + len(line) > max_length:
+                messages_to_send.append(temp_message)
+                temp_message = line
+            else:
+                temp_message += line
+        if temp_message: messages_to_send.append(temp_message)
 
-    all_sent_successfully = True
-    for i, part_message in enumerate(messages_to_send):
-        if not part_message.strip(): continue
-        payload = {'chat_id': chat_id, 'text': part_message, 'disable_web_page_preview': False}
+    success = True
+    for part in messages_to_send:
+        payload = {'chat_id': chat_id, 'text': part, 'disable_web_page_preview': False}
         try:
             response = requests.post(send_url, data=payload, timeout=30)
-            if response.status_code == 200 and response.json().get("ok"):
-                logging.info(f"Parte {i+1}/{len(messages_to_send)} enviada ao Telegram.")
-            else:
-                logging.error(f"Falha envio parte {i+1} Telegram. Status: {response.status_code}, Resp: {response.text}")
-                all_sent_successfully = False
+            if response.status_code != 200:
+                logging.error(f"Falha envio Telegram: {response.text}")
+                success = False
             time.sleep(2)
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Exceção envio parte {i+1} Telegram: {e}")
-            all_sent_successfully = False
-    return all_sent_successfully
+            logging.exception(f"Exceção envio Telegram: {e}")
+            success = False
+    return success
 
 def main_automated():
-    print("--- [DEBUG] SCRIPT PRINCIPAL INICIADO ---")
     logging.info("Iniciando execução do Juninho News Automatizado.")
-    if not all([NEWS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+    if not all([NEWS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, COMMODITIES_API_KEY]):
         logging.critical("ERRO CRÍTICO: Variáveis de ambiente essenciais não configuradas!")
         return
 
-    current_time_obj = datetime.now(FUSO_BRASIL)
-    eth_val, btc_val = get_crypto_price('ethereum', 'Ethereum'), get_crypto_price('bitcoin', 'Bitcoin')
-
+    current_time = datetime.now(FUSO_BRASIL)
+    eth, btc = get_crypto_price('ethereum', 'ETH'), get_crypto_price('bitcoin', 'BTC')
+    
     jornal_data = {
-        'saudacao': get_saudacao(),
-        'data_display': current_time_obj.strftime('%d/%m/%Y'),
-        'fase_lua': fase_da_lua(current_time_obj.strftime('%Y/%m/%d')),
+        'data_display': current_time.strftime('%d/%m/%Y'),
+        'fase_lua': fase_da_lua(current_time.strftime('%Y/%m/%d')),
         'frase_dia': get_quote_pensador(),
         'versiculo_dia': get_biblical_verse(),
         'datas_comemorativas': obter_datas_comemorativas(FILE_PATH_DATAS_COMEMORATIVAS),
         'cotacoes': {
             'dolar': get_exchange_rate_api("USD", "BRL", EXCHANGE_RATE_API_KEY),
             'euro': get_exchange_rate_api("EUR", "BRL", EXCHANGE_RATE_API_KEY),
-            'eth_plain_str': f"{eth_val:,.2f}" if eth_val is not None else "Erro/Indisponível",
-            'btc_plain_str': f"{btc_val:,.2f}" if btc_val is not None else "Erro/Indisponível",
+            'eth_plain_str': f"{eth:,.2f}" if eth else "Indisponível",
+            'btc_plain_str': f"{btc:,.2f}" if btc else "Indisponível",
         },
-        'commodities': get_cepea_prices_scraping(),
+        'commodities': get_commodity_prices(COMMODITIES_API_KEY),
         'noticias': {},
-        'fake_news': get_boatos_org_feed()
+        'fact_check': get_fact_check_feed()
     }
 
-    news_sections_queries = {
-        "🇧🇷 BRASIL GERAL": "Brasil",
-        "🟢 Goiás (Estado)": f"Goiás OR \"Estado de Goiás\" NOT \"Goiás Esporte Clube\"",
-        "🌍 Geopolítica": "Geopolítica OR \"Relações Internacionais\"",
-        "🌐 INTERNACIONAL": "Internacional OR Mundial NOT Brasil",
-        "⚽ Futebol": "Futebol Brasil OR \"Campeonato Brasileiro\" OR Libertadores OR \"Copa do Brasil\"",
-        "💰 ECONOMIA & NEGÓCIOS": "\"Economia Brasileira\" OR Inflação OR Selic OR IBGE OR BCB",
-        "🍀 LOTERIAS": "\"Loterias Caixa\" OR Mega-Sena OR Quina OR Lotofácil",
-        "🌟 FAMA & ENTRETENIMENTO": "Celebridades OR Entretenimento OR Famosos Brasil",
-        "✈️ TURISMO": "Turismo Brasil OR Viagens OR \"Pontos Turísticos\"",
-        "🏆 ESPORTES": "Esportes Brasil -futebol NOT \"e-sports\"",
-        "💻 Tecnologia": "Tecnologia OR Inovação OR Inteligência Artificial OR Startups Brasil"
+    news_sections = {
+        "🇧🇷 BRASIL GERAL": "Brasil", "🟢 Goiás (Estado)": "Goiás", "🌍 Geopolítica": "Geopolítica",
+        "🌐 INTERNACIONAL": "Mundo", "⚽ Futebol": "Futebol Brasileiro", "💰 ECONOMIA & NEGÓCIOS": "Economia Brasil",
+        "🍀 LOTERIAS": "Mega-Sena OR Quina OR Lotofácil", "🌟 FAMA & ENTRETENIMENTO": "Celebridades Brasil",
+        "✈️ TURISMO": "Turismo Brasil", "🏆 ESPORTES": "Esportes Brasil -futebol", "💻 Tecnologia": "Tecnologia Brasil"
     }
-    
-    print("[DEBUG] Buscando notícias...")
-    for titulo_secao_com_emoji, query in news_sections_queries.items():
-        artigos, msg_erro = buscar_noticias_newsapi(query, max_articles=5)
-        if msg_erro and not artigos: jornal_data['noticias'][titulo_secao_com_emoji] = msg_erro
-        elif not artigos and not msg_erro: jornal_data['noticias'][titulo_secao_com_emoji] = f"Nenhuma notícia relevante para '{query}'."
-        else: jornal_data['noticias'][titulo_secao_com_emoji] = artigos
-    
-    print("[DEBUG] Formatando mensagem para o Telegram...")
-    telegram_message_text = formatar_para_telegram_plain(jornal_data)
-    
-    print("[DEBUG] Enviando mensagem para o Telegram...")
-    if not send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, telegram_message_text):
-        logging.error("Falha CRÍTICA ao enviar a mensagem completa para o Telegram.")
-        print("[DEBUG] FALHA AO ENVIAR MENSAGEM PARA O TELEGRAM.")
-    else:
+    for title, query in news_sections.items():
+        articles, error_msg = buscar_noticias_newsapi(query)
+        jornal_data['noticias'][title] = articles if articles else error_msg or "Nenhuma notícia encontrada."
+
+    message = formatar_para_telegram_plain(jornal_data)
+    if send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, message):
         logging.info("Juninho News enviado com sucesso para o Telegram!")
-        print("[DEBUG] MENSAGEM ENVIADA COM SUCESSO PARA O TELEGRAM.")
+    else:
+        logging.error("Falha CRÍTICA ao enviar a mensagem completa para o Telegram.")
 
-# --- Bloco de Execução Principal ---
 if __name__ == "__main__":
     try:
         main_automated()
     except Exception as e:
-        print("\n\n-------------------------------------------")
-        print("--- OCORREU UM ERRO INESPERADO ---")
-        print("-------------------------------------------")
-        print(f"\n[TIPO DE ERRO]: {type(e).__name__}")
-        print(f"[MENSAGEM]: {e}")
-        import traceback
-        print("\n--- RASTREAMENTO TÉCNICO DETALHADO ---")
-        traceback.print_exc()
-        print("\n-------------------------------------------")
-        print("Por favor, copie e cole TODA esta mensagem (desde a linha 'OCORREU UM ERRO INESPERADO') para me ajudar a resolver.")
-        print("-------------------------------------------\n")
+        logging.critical(f"Erro inesperado na execução principal: {e}", exc_info=True)
+        # O try/except de debug mais detalhado foi removido para a versão final,
+        # mas a exceção ainda será logada como CRITICAL.
